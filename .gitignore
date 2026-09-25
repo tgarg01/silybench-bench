@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Terraform (state and real tfvars hold project/billing IDs: never commit them)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform.lock.hcl
+terraform.tfvars
+*.auto.tfvars
+
+# Benchmark outputs (submitted to silybench-data with `gpubench submit`)
+results/
+submission/
+
+.DS_Store
+.env*
+.gpubench-commit

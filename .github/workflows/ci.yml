@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --python 3.11
+      - run: uv run ruff check .
+      - run: uv run pytest -q
+      - name: Every campaign config validates
+        run: for c in configs/*.yaml; do uv run gpubench validate "$c" > /dev/null; done
+      - name: Plan estimates run without a GPU
+        run: uv run gpubench plan configs/qwen3-8b.yaml --price-per-hour 2.5
+      - run: bash -n setup.sh infra/scripts/*.sh
+
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive infra/terraform
+      - run: |
+          for d in infra/terraform/base infra/terraform/envs/*/; do
+            terraform -chdir="$d" init -backend=false -input=false
+            terraform -chdir="$d" validate
+          done

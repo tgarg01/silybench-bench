@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars (git-ignored) and fill in.
+project_id = "your-gcp-project-id"
+zone       = "us-central1-a"
+bucket     = "your-results-bucket" # output of infra/terraform/base
+# Whole-VM USD/h, recorded in results. a3-highgpu-1g Spot, us-central1, 2026-09-24:
+# H100 $5.8632/h + 26 vCPU x $0.01527 + 234 GiB x $0.001328 (boot disk excluded)
+price_per_hour = 6.57
+# campaign, code_uri, config_path and max_run_hours are passed by infra/scripts/up.sh

@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars (git-ignored) and fill in.
+project_id         = "your-gcp-project-id"
+project_number     = "123456789012"
+region             = "us-central1"
+bucket_name        = "your-results-bucket"
+billing_account    = "XXXXXX-XXXXXX-XXXXXX"
+monthly_budget_usd = 200
