@@ -114,6 +114,7 @@ class QualitySuite(BaseModel):
     sha256: str
     recall_max_tokens: int = 96
     drift_max_tokens: int = 256
+    limit: int | None = None  # items of each kind (smoke tests); None = all
 
 
 class Workload(BaseModel):

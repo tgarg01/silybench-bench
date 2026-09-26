@@ -74,6 +74,7 @@ TARBALL=$(mktemp -t gpubench).tgz
 COPYFILE_DISABLE=1 tar -czf "$TARBALL" -C "$ROOT" \
   --exclude .git --exclude .venv --exclude .terraform --exclude results \
   --exclude submission --exclude '*.tfstate*' --exclude terraform.tfvars \
+  --exclude datasets --exclude publish-stage --exclude quality-runs \
   .
 gcloud storage cp "$TARBALL" "$CODE_URI"
 rm -f "$TARBALL" "$ROOT/.gpubench-commit"

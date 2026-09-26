@@ -213,7 +213,8 @@ def run_session(
                     server.base_url, session.served_model, workload.name, dataset, work_dir,
                     concurrency=max(1, min(4, kv_users)),
                     recall_max_tokens=suite.recall_max_tokens,
-                    drift_max_tokens=suite.drift_max_tokens, echo=log.info))
+                    drift_max_tokens=suite.drift_max_tokens, echo=log.info,
+                    limit=suite.limit))
                 save()
             except Exception:
                 log.exception("FAILED quality suite of %s; continuing", workload.name)

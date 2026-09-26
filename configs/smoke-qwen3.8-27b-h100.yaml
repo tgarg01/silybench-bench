@@ -1,0 +1,57 @@
+# Smoke test for experiment 2026-10-qwen3.8-27b-h100 (never published: campaign smoke-*).
+# Same models, serving flags and datasets; tiny load so it finishes in ~45 min.
+# Proves on the real VM: both checkpoints load, 100k requests fit and finish, the quality
+# suite runs, the fingerprint is captured, and a relaunch resumes.
+# Original header: Qwen3.8-27B on 1x H100 SXM 80GB (GCP a3-highgpu-1g Spot).
+# Performance only (accuracy is a later run merged into the same experiment).
+# BF16 = the base checkpoint; FP8 = Qwen's official FP8 checkpoint (how APIs usually serve it).
+name: smoke-qwen3.8-27b-h100
+parallelism: {tp: 1, pp: 1, dp: 1, ep: 1}
+engine:
+  image: vllm/vllm-openai:v0.30.0
+models:
+  - hf_id: Qwen/Qwen3.8-27B
+    checkpoints: {fp8: Qwen/Qwen3.8-27B-FP8}
+    precisions: [bf16, fp8]
+    max_model_len: 131072
+    thinking: true  # the model's default; irrelevant to perf (fixed lengths, --ignore-eos)
+    serving_args:
+      language-model-only: true  # text only: skip the vision encoder, more room for KV cache
+      no-enable-prefix-caching: true  # no request reuses another's prompt: measure the worst case
+      reasoning-parser: qwen3
+      enable-auto-tool-choice: true
+      tool-call-parser: qwen3_xml
+perf:
+  workloads:
+    # Real tool-calling agent contexts (SWE-agent sessions, exactly 100k tokens each).
+    # A 100k prompt alone takes ~10 s to read, so first token is held to 30 s here.
+    - name: toolcall-100k-512
+      dataset: custom
+      input_len: 100000
+      output_len: 512
+      dataset_path: datasets/toolcall-100k.jsonl
+      dataset_url: https://github.com/tgarg01/silybench-data/releases/download/exp-2026-10-qwen3.8-27b-h100/toolcall-100k.jsonl
+      sha256: c35ce2d6c4eb9c5bffe80544042d0555dd0d8293924baffe6de142f09531083b
+      concurrency: [1, 2]
+      min_prompts: 2
+      num_warmups: 0
+      slo: {ttft_p99_ms: 30000, itl_median_ms: 50}
+      # Correctness (the perf run forces 512 output tokens, so it can't tell): 100 exact-answer
+      # recall questions about tool outputs deep in the context + 100 drift decision points.
+      quality:
+        dataset_path: datasets/toolcall-100k-quality.jsonl
+        dataset_url: https://github.com/tgarg01/silybench-data/releases/download/exp-2026-10-qwen3.8-27b-h100/toolcall-100k-quality.jsonl
+        sha256: 2cf0a857ef5f9f37a5430dc683e4853a14084c308322620b8401ad3e62e7df3f
+        limit: 5
+    - {name: chat-128-128, input_len: 128, output_len: 128, concurrency: [1, 16]}
+  concurrency: [1, 4, 16, 32, 64, 128, 256, 512]
+  repeats: 1
+  prompts_per_user: 1
+  min_prompts: 16
+  num_warmups: 2
+  capacity: {enabled: false}
+  slo:
+    ttft_p99_ms: 2000
+    itl_median_ms: 50
+accuracy:
+  enabled: false

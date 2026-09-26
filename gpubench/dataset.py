@@ -85,7 +85,7 @@ def merge_runs(runs: list[RunResult]) -> list[RunResult]:
 
 def publishable(runs: list[RunResult]) -> list[RunResult]:
     """Merged runs as published: smoke tests never, samples only while no real run exists."""
-    runs = merge_runs([r for r in runs if r.campaign != "smoke"])
+    runs = merge_runs([r for r in runs if not r.campaign.startswith("smoke")])
     runs = [fill_missing_capacity(r) for r in runs]
     if any(not r.sample for r in runs):
         runs = [r for r in runs if not r.sample]
@@ -131,7 +131,7 @@ def check_result(result: RunResult, allow_incomplete: bool = False) -> list[str]
         problems.append("sample (synthetic) data")
     if result.software.runtime == "mock":
         problems.append("mock runtime (CI pipeline test, not a GPU measurement)")
-    if result.campaign == "smoke":
+    if result.campaign.startswith("smoke"):
         problems.append("smoke-test campaign (pipeline check, not a benchmark)")
     if not result.complete and not allow_incomplete:
         problems.append("run did not finish (complete=false); finish it with --resume")

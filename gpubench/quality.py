@@ -159,9 +159,12 @@ def parse_tool_call(text: str) -> tuple[str, dict[str, str]] | None:
 
 def run_quality(base_url: str, model: str, workload: str, dataset: Path, run_dir: Path,
                 concurrency: int = 1, recall_max_tokens: int = 96,
-                drift_max_tokens: int = 256, echo: Callable[[str], None] = print
-                ) -> QualityResult:
+                drift_max_tokens: int = 256, echo: Callable[[str], None] = print,
+                limit: int | None = None) -> QualityResult:
     items = load_items(dataset)
+    if limit:
+        items = ([i for i in items if i["kind"] == "recall"][:limit]
+                 + [i for i in items if i["kind"] == "drift"][:limit])
     out = run_dir / "quality" / f"{workload}.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
 

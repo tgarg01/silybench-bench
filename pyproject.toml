@@ -1,6 +1,6 @@
 [project]
 name = "gpubench"
-version = "0.4.0"
+version = "0.4.1"
 description = "Benchmark open-source LLMs on GPUs with vLLM: performance, capacity and accuracy."
 requires-python = ">=3.11"
 dependencies = [
