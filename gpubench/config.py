@@ -86,6 +86,9 @@ class ModelSpec(BaseModel):
     gpu_memory_utilization: float = 0.90
     # Extra vLLM flags, e.g. {"reasoning-parser": "qwen3"}. Values may be str/int/dict.
     serving_args: dict[str, object] = Field(default_factory=dict)
+    # Per-precision additions/overrides, e.g. {bf16: {max-num-seqs: 320}} when a limit
+    # depends on how much memory the weights leave (hybrid models' Mamba state blocks).
+    precision_serving_args: dict[Precision, dict[str, object]] = Field(default_factory=dict)
     # Recorded in results so thinking vs. non-thinking runs are never mixed up.
     thinking: bool = False
 
@@ -267,6 +270,14 @@ class ServingSession(BaseModel):
         return self.model.checkpoint(self.precision)
 
     @property
+    def max_num_seqs(self) -> int | None:
+        """vLLM's cap on concurrently running requests, if set (more users only queue)."""
+        m = self.model
+        value = {**m.serving_args, **m.precision_serving_args.get(self.precision, {})}.get(
+            "max-num-seqs")
+        return int(value) if value is not None else None
+
+    @property
     def prequantized(self) -> bool:
         return self.served_model != self.model.hf_id
 
@@ -287,7 +298,8 @@ class ServingSession(BaseModel):
         else:
             args += ["--dtype", {"bf16": "bfloat16", "fp16": "float16"}[self.precision]]
         args += self.config.parallelism.vllm_args()
-        for key, value in m.serving_args.items():
+        extra = {**m.serving_args, **m.precision_serving_args.get(self.precision, {})}
+        for key, value in extra.items():
             flag = f"--{key}"
             if value is True:
                 args.append(flag)

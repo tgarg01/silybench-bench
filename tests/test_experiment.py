@@ -222,3 +222,17 @@ def test_sanitized_bundle_drops_private_state(tmp_path):
     (run / "accuracy" / "samples_x.jsonl").write_text("{}\n")
     with tarfile.open(pack_run(run, tmp_path / "o2")) as tar:
         assert f"{run.name}/accuracy/samples_x.jsonl" in tar.getnames()  # nothing left out
+
+
+def test_per_precision_max_num_seqs_caps_the_sweep(cfg):
+    """Smoke run finding: hybrid models need max-num-seqs <= Mamba state blocks."""
+    bf16, fp8 = cfg.sessions()
+    assert bf16.max_num_seqs == 320 and fp8.max_num_seqs == 768
+    a = bf16.vllm_args()
+    assert a[a.index("--max-num-seqs") + 1] == "320"
+    chat = next(w for w in cfg.perf.workloads if w.name == "chat-128-128")
+    # KV would allow ~976 chat requests, but only 320 run at once: 2x320 caps the sweep.
+    run, skipped = cfg.perf.levels(chat, min(976, bf16.max_num_seqs))
+    assert run[-1] == 512 and skipped == []
+    run, skipped = cfg.perf.levels(chat, min(976, 200))
+    assert skipped == [512]

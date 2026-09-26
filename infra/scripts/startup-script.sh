@@ -99,7 +99,9 @@ mkdir -p /opt/hf-cache /opt/gpubench-results
 # raw bench JSON, telemetry, logs) plus the campaign's fingerprint; `--resume` then skips all
 # finished work. On a first launch there is nothing to pull.
 CAMPAIGN=$(uv run python -c "from gpubench.config import load_config; print(load_config('$WORK/$CONFIG').name)")
-gcloud storage rsync -r "gs://$BUCKET/runs" /opt/gpubench-results || true
+# Only this campaign's models' runs (run ids end in _<model slug>_<precision>).
+SLUGS=$(uv run python -c "import re; from gpubench.config import load_config; print('|'.join(re.escape(m.slug) for m in load_config('$WORK/$CONFIG').models))")
+gcloud storage rsync -r -x "^(?!.*_($SLUGS)_(bf16|fp16|fp8)/).*" "gs://$BUCKET/runs" /opt/gpubench-results || true
 gcloud storage cp "gs://$BUCKET/campaign-state/$CAMPAIGN/fingerprint.json" /opt/gpubench-results/ 2>/dev/null || true
 # RUN_ARGS carries --provider gcp --price-per-hour ... (set by up.sh) plus any filters.
 # shellcheck disable=SC2086  # RUN_ARGS is intentionally word-split into flags

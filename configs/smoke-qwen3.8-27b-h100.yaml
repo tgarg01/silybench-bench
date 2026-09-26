@@ -21,6 +21,13 @@ models:
       reasoning-parser: qwen3
       enable-auto-tool-choice: true
       tool-call-parser: qwen3_xml
+    # Each running request needs one Mamba state block (hybrid linear-attention layers); vLLM's
+    # default max-num-seqs (1024) exceeds what fits and refuses to start. The largest allowed
+    # value (from vLLM's own check on this GPU: 326 blocks BF16, 792 FP8) keeps each
+    # deployment's full capacity.
+    precision_serving_args:
+      bf16: {max-num-seqs: 320}
+      fp8: {max-num-seqs: 768}
 perf:
   workloads:
     # Real tool-calling agent contexts (SWE-agent sessions, exactly 100k tokens each).

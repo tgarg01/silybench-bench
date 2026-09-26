@@ -148,8 +148,14 @@ def run_session(
             upload_result(work_dir, bucket, cfg.name)
 
     save()
-    progress.update(run_id=result.run_id, session=session.session_id, stage="starting vLLM")
+    progress.update(run_id=result.run_id, session=session.session_id, stage="starting vLLM",
+                    detail=session.served_model)
     server = make_server(runtime, session, work_dir / "vllm.log", hf_cache, work_dir)
+    try:
+        server.start()
+    except Exception:
+        save()  # mirror vllm.log (the reason) before giving up on this session
+        raise
     with server:
         result.software.engine_version = server.version()
         result.software.engine_image_digest = server.image_digest()
@@ -180,6 +186,9 @@ def run_session(
                     return point
 
                 kv_users = kv_cache_max_users(result.kv_cache_tokens, workload)
+                # Past vLLM's running-request cap, extra users only queue too.
+                if session.max_num_seqs:
+                    kv_users = min(kv_users or session.max_num_seqs, session.max_num_seqs)
                 levels, skipped = perf.levels(workload, kv_users)
                 if skipped:
                     log.info("%s: skipping %s users (> %sx the %s that fit in the KV cache)",

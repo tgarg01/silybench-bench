@@ -1,3 +1,3 @@
 """gpubench: LLM inference benchmarking on GPUs with vLLM."""
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"

@@ -154,7 +154,8 @@ class VllmServer:
         return parse_kv_cache_tokens(self.log_path.read_text(errors="replace"))
 
     def __enter__(self) -> VllmServer:
-        self.start()
+        if not self.is_running():
+            self.start()
         return self
 
     def __exit__(self, *exc) -> None:

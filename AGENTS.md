@@ -51,7 +51,10 @@ the VM runs the campaign by itself.
 1. **Prerequisites.** Check each; ask the person to fix anything missing:
    - `gcloud` and `terraform` are installed. `gcloud auth login` and
      `gcloud auth application-default login` are done. A project is selected with billing enabled.
-   - The zone's region has Spot H100 quota ≥ 1: `gcloud compute regions describe us-central1 --format=json`, then look at `PREEMPTIBLE_NVIDIA_H100_GPUS` (limit minus usage). If it is 0, the person must request quota in the console; stop until then.
+   - The project has Spot (preemptible) H100 quota ≥ 1 in the zone's region: ask the person to
+     check "Preemptible NVIDIA H100 GPUs" for us-central1 in the console (IAM & Admin → Quotas).
+     It isn't listed by `gcloud compute regions describe`. If it is 0, they request an increase;
+     stop until then.
    - One-time base resources (bucket, service account, budget):
      `cp infra/terraform/base/terraform.tfvars.example infra/terraform/base/terraform.tfvars`.
      Fill it in with the person, then
