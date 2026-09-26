@@ -39,7 +39,7 @@ def test_fp8_serves_official_checkpoint(cfg):
 def test_per_workload_overrides(cfg):
     perf = cfg.perf
     tc = next(w for w in perf.workloads if w.name == "toolcall-100k-512")
-    chat = perf.workloads[0]
+    chat = next(w for w in perf.workloads if w.name == "chat-128-128")
     assert perf.slo_for(tc) == SLO(ttft_p99_ms=30000, itl_median_ms=50)
     assert perf.slo_for(chat) == SLO()
     assert perf.concurrency_for(tc) == [1, 2, 4, 8]
@@ -64,7 +64,7 @@ def test_custom_workload_needs_hash():
 
 
 def test_sweep_skips_levels_far_past_kv_limit(cfg):
-    chat = cfg.perf.workloads[0]
+    chat = next(w for w in cfg.perf.workloads if w.name == "chat-128-128")
     assert cfg.perf.levels(chat, None) == ([1, 4, 16, 32, 64, 128, 256, 512], [])
     run, skipped = cfg.perf.levels(chat, 40)  # 2x40 = 80 users
     assert run == [1, 4, 16, 32, 64] and skipped == [128, 256, 512]

@@ -105,6 +105,17 @@ class SLO(BaseModel):
     itl_median_ms: float = 50.0  # 50 ms => >= 20 tok/s per user
 
 
+class QualitySuite(BaseModel):
+    """Correctness checks run after a workload's perf (gpubench.quality): long-context recall
+    questions + a drift baseline, from the same contexts as the perf prompts."""
+
+    dataset_path: str
+    dataset_url: str | None = None
+    sha256: str
+    recall_max_tokens: int = 96
+    drift_max_tokens: int = 256
+
+
 class Workload(BaseModel):
     name: str
     # random: synthetic tokens of exactly input_len. custom: a JSONL of pre-rendered prompts
@@ -122,6 +133,7 @@ class Workload(BaseModel):
     min_prompts: int | None = None
     repeats: int | None = None
     num_warmups: int | None = None
+    quality: QualitySuite | None = None
 
     @model_validator(mode="after")
     def _check(self) -> Workload:
@@ -153,6 +165,7 @@ class CapacitySearch(BaseModel):
 
 class PerfConfig(BaseModel):
     workloads: list[Workload]
+    enabled: bool = True  # False = only the quality suites (e.g. re-checking an optimization)
     concurrency: list[int] = [1, 4, 16, 32, 64, 128, 256, 512]
     # num_prompts = max(min_prompts, prompts_per_user * concurrency)
     prompts_per_user: int = 5

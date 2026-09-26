@@ -65,10 +65,15 @@ the VM runs the campaign by itself.
    ```
    Say "about X hours, about $Y, plus restarts if Spot capacity is reclaimed. Start?" **Wait for yes.**
 3. **Launch with the watchdog.** It relaunches after Spot preemptions and resumes from the last
-   measured point:
+   measured point. Use the phases that `show` prints (`phases:`). For `2026-10-qwen3.8-27b-h100`
+   the 100k tool-calling scenario runs first on both precisions, including its quality suite, and
+   the other five scenarios run after it:
    ```bash
-   infra/scripts/watch.sh h100-1g <config from show> --experiment <id> --image <image from show>
+   infra/scripts/watch.sh h100-1g <config from show> --experiment <id> --image <image from show> \
+     --phase "--workload toolcall-100k-512" --phase "--skip-workload toolcall-100k-512"
    ```
+   Every relaunched VM re-fingerprints itself and must match the first one exactly (±5% on the
+   measured speeds). If it doesn't, watch.sh retries up to 3 hosts, then stops.
    On boot the VM fingerprints its hardware and runs **verify-host** against the experiment's
    reference before measuring anything. If the hardware differs (another GPU variant, power
    limit, driver, memory bandwidth off by more than 5%, …), the run stops, the VM deletes itself
@@ -98,6 +103,31 @@ infra/scripts/down.sh h100-1g        # safe if the VM already deleted itself
 gcloud compute instances list        # must show no gpubench VM
 ```
 Tell the person that the results bucket costs cents per month, and that they can delete it.
+
+## Checking correctness before and after an optimization (custom long-context scenarios)
+Perf runs force a fixed output length, so they say nothing about correctness. Scenarios with a
+`quality:` suite (the 100k tool-calling one) run it right after their perf points, on the same
+server:
+- **recall**: 100 exact-answer questions about tool outputs 20-80% deep inside the 100k context
+  ("What was the first line of the output of the command `…`?");
+- **drift**: 100 decision points (greedy decoding, top-20 logprobs) whose tool calls and token
+  distributions are the baseline.
+
+The published run's `quality/toolcall-100k-512.jsonl` (in the experiment's release) is the
+**before**. To check an optimized build (new kernel, engine flag, quantization, …):
+```bash
+# serve the optimized build on the same GPU type, same checkpoint, then:
+uv run gpubench quality run configs/qwen3.8-27b-h100.yaml --workload toolcall-100k-512 \
+  --base-url http://localhost:8000 --model Qwen/Qwen3.8-27B-FP8 --out quality-runs/candidate
+uv run gpubench quality compare <baseline run dir> quality-runs/candidate
+```
+`compare` passes when:
+- ≥ 97% of the tool calls are identical;
+- mean KL divergence ≤ 0.02 and ≥ 98% top-1 token agreement before the first divergence;
+- recall drops by ≤ 2 points.
+
+Report every number, not just PASS/FAIL. Compare each precision with its own baseline: FP8 vs
+FP8, BF16 vs BF16.
 
 ## Experiments on other providers (e.g. a RunPod pod)
 When an experiment's `where:` is a pod or VM you connect to by SSH, you run **on that machine**:

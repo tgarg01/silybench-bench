@@ -20,6 +20,18 @@ jobs:
         run: uv run gpubench plan configs/qwen3-8b.yaml --price-per-hour 2.5
       - run: bash -n setup.sh infra/scripts/*.sh
 
+  # The AGENTS.md benchmark flow end to end on the GPU-free mock runtime: plan, detached run,
+  # status, resume, quality compare, submit (must refuse mock runs), data build. It never runs
+  # the real scenarios; GPU behaviour is checked by the paid GCP smoke run.
+  agent-flow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --python 3.11
+      - run: bash tests/agent_flow.sh
+
   terraform:
     runs-on: ubuntu-latest
     steps:

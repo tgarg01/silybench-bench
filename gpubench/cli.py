@@ -30,6 +30,79 @@ prompts_app = typer.Typer(no_args_is_help=True, help="Build prompt datasets for 
 app.add_typer(prompts_app, name="prompts")
 
 
+quality_app = typer.Typer(no_args_is_help=True,
+                          help="Correctness of custom long-context scenarios.")
+app.add_typer(quality_app, name="quality")
+
+
+@quality_app.command("make")
+def quality_make(
+    model: str = typer.Option(..., help="HF model whose tokenizer and chat template to use"),
+    tokens: int = typer.Option(100_000, help="Context length of the perf prompts"),
+    count: int = typer.Option(100, help="Recall questions and drift prompts (each)"),
+    out: Path = typer.Option(Path("datasets/toolcall-100k-quality.jsonl")),
+    shards: int = typer.Option(4),
+    seed: int = typer.Option(42, help="Must match the perf dataset's seed"),
+) -> None:
+    """Build recall + drift items from the same contexts as the tool-calling perf prompts."""
+    from gpubench.quality import build_quality_dataset
+
+    build_quality_dataset(model, tokens, count, out, seed=seed, shards=shards, echo=typer.echo)
+
+
+@quality_app.command("run")
+def quality_run(
+    config: Path,
+    workload: str = typer.Option(..., help="Workload whose quality suite to run"),
+    base_url: str = typer.Option("http://localhost:8000", help="A running OpenAI-compatible "
+                                 "server, e.g. your optimized build"),
+    model: str = typer.Option(..., help="Served model name"),
+    out: Path = typer.Option(Path("quality-runs/candidate"), help="Where responses go"),
+    concurrency: int = typer.Option(1),
+) -> None:
+    """Run a quality suite against any server (the before/after loop of an optimization)."""
+    from gpubench.prompts import ensure_file
+    from gpubench.quality import run_quality
+
+    cfg = load_config(config)
+    wl = next((w for w in cfg.perf.workloads if w.name == workload), None)
+    if wl is None or wl.quality is None:
+        raise typer.BadParameter(f"{workload} has no quality suite in {config}")
+    dataset = ensure_file(wl.quality.dataset_path, wl.quality.dataset_url, wl.quality.sha256,
+                          f"{workload}-quality")
+    result = run_quality(base_url, model, workload, dataset, out, concurrency,
+                         wl.quality.recall_max_tokens, wl.quality.drift_max_tokens,
+                         echo=typer.echo)
+    (out / "quality.json").write_text(result.model_dump_json(indent=2))
+
+
+@quality_app.command("compare")
+def quality_compare(
+    baseline: Path = typer.Argument(..., help="Run dir (or dir with quality/) of the baseline"),
+    candidate: Path = typer.Argument(..., help="Run dir of the optimized build"),
+    workload: str = typer.Option("toolcall-100k-512"),
+) -> None:
+    """Is the optimized build as correct as the baseline? Exit 1 if not."""
+    from gpubench.quality import compare_responses, load_items
+
+    def responses(d: Path) -> list[dict]:
+        f = d / "quality" / f"{workload}.jsonl"
+        if not f.exists():
+            raise typer.BadParameter(f"{f} not found")
+        return load_items(f)
+
+    report = compare_responses(responses(baseline), responses(candidate))
+    for k in ("same_tool_call", "mean_kl", "top1_agreement", "median_divergence_token",
+              "recall_baseline", "recall_candidate"):
+        v = report[k]
+        typer.echo(f"  {k:24s} {v:.4f}" if isinstance(v, float) else f"  {k:24s} {v}")
+    for k, ok in report["checks"].items():
+        typer.echo(f"{'✓' if ok else '✗'} {k}")
+    typer.echo("PASS" if report["pass"] else "FAIL")
+    if not report["pass"]:
+        raise typer.Exit(1)
+
+
 @prompts_app.command("make-toolcall")
 def make_toolcall(
     model: str = typer.Option(..., help="HF model whose tokenizer and chat template to use"),
@@ -63,6 +136,8 @@ def filter_config(
     workloads: list[str] | None,
     skip_accuracy: bool = False,
     skip_perf: bool = False,
+    skip_workloads: list[str] | None = None,
+    quality_only: bool = False,
 ) -> BenchConfig:
     """Narrow a campaign (e.g. re-run only FP8). The config hash then reflects what actually ran."""
     cfg = cfg.model_copy(deep=True)
@@ -75,6 +150,17 @@ def filter_config(
         if unknown:
             raise typer.BadParameter(f"unknown workloads: {sorted(unknown)}")
         cfg.perf.workloads = [w for w in cfg.perf.workloads if w.name in workloads]
+    if skip_workloads:
+        unknown = set(skip_workloads) - {w.name for w in cfg.perf.workloads}
+        if unknown:
+            raise typer.BadParameter(f"unknown workloads: {sorted(unknown)}")
+        cfg.perf.workloads = [w for w in cfg.perf.workloads if w.name not in skip_workloads]
+    if quality_only:
+        cfg.perf.enabled = False
+        cfg.accuracy.enabled = False
+        if not any(w.quality for w in cfg.perf.workloads):
+            raise typer.BadParameter("--quality-only: no selected workload has a quality suite")
+        return cfg
     if skip_accuracy:
         cfg.accuracy.enabled = False
     if skip_perf:
@@ -91,9 +177,13 @@ def validate(
     workload: list[str] = typer.Option(None),
     skip_accuracy: bool = typer.Option(False),
     skip_perf: bool = typer.Option(False),
+    skip_workload: list[str] = typer.Option(None),
+    skip_quality: bool = typer.Option(False),
+    quality_only: bool = typer.Option(False),
 ) -> None:
     """Validate a config and print the sessions and perf points it expands to."""
-    cfg = filter_config(load_config(config), precision, workload, skip_accuracy, skip_perf)
+    cfg = filter_config(load_config(config), precision, workload, skip_accuracy, skip_perf,
+                        skip_workload, quality_only)
     perf = cfg.perf
     typer.echo(f"campaign {cfg.name}")
     for w in perf.workloads:
@@ -235,6 +325,9 @@ def run(
     skip_perf: bool = typer.Option(False, help="Skip performance (accuracy-only re-run)"),
     experiment: str = typer.Option(None, help="Experiment id these runs belong to"),
     no_fingerprint: bool = typer.Option(False, help="Skip the hardware fingerprint"),
+    skip_workload: list[str] = typer.Option(None, help="Run every workload except these"),
+    skip_quality: bool = typer.Option(False, help="Skip the quality suites"),
+    quality_only: bool = typer.Option(False, help="Only the quality suites (no perf points)"),
 ) -> None:
     """Run a campaign on this machine (needs NVIDIA GPUs; Docker optional)."""
     from gpubench.plan import estimate
@@ -243,7 +336,8 @@ def run(
     from gpubench.server import pick_runtime
     from gpubench.storage import upload_run
 
-    cfg = filter_config(load_config(config), precision, workload, skip_accuracy, skip_perf)
+    cfg = filter_config(load_config(config), precision, workload, skip_accuracy, skip_perf,
+                        skip_workload, quality_only)
     cfg = resolve_hardware(cfg, provider, price_per_hour, provisioning, gpu_type, gpu_count,
                            machine_type, zone)
     hw = cfg.hardware
@@ -297,7 +391,8 @@ def run(
     for session in cfg.sessions():
         try:
             result = run_session(session, out, hf_cache, bucket, runtime=rt, resume=resume,
-                                 progress=progress, experiment=experiment, fingerprint=fp)
+                                 progress=progress, experiment=experiment, fingerprint=fp,
+                                 quality=not skip_quality)
         except Exception:
             logging.exception("FAILED session %s; continuing", session.session_id)
             failed.append(session.session_id)
@@ -325,15 +420,31 @@ def campaign_fingerprint(cfg: BenchConfig, runtime: str, out: Path, hf_cache: Pa
     from gpubench.server import make_server
 
     path = out / "fingerprint.json"
-    if path.exists():
-        return json.loads(path.read_text())
     progress.update(stage="fingerprint", detail="GPU microbenchmark")
     session = cfg.sessions()[0]
     server = make_server(runtime, session, out / "fingerprint-vllm.log", hf_cache, out)
     fp = collect(server.python_cmd(), hf_shard_url(session.served_model), echo=typer.echo)
-    path.write_text(json.dumps(fp, indent=2))
     typer.echo(f"fingerprint: {summary(fp)}")
-    return fp
+    if not path.exists():
+        path.write_text(json.dumps(fp, indent=2))
+        return fp
+    # Resumed (e.g. a new Spot VM after preemption): this machine must be the same hardware
+    # as the one the campaign started on, or its numbers can't be merged with the rest.
+    from gpubench import experiment as ex
+
+    first = json.loads(path.read_text())
+    boots = out / "fingerprints"
+    boots.mkdir(exist_ok=True)
+    (boots / f"{fp['collected_at'].replace(':', '')}.json").write_text(json.dumps(fp, indent=2))
+    checks = ex.compare_fingerprints(first, fp)
+    typer.echo(ex.format_checks(checks))
+    if not ex.verdict(checks):
+        progress.finish(["resumed on different hardware"])
+        typer.echo("FAIL: this machine differs from the one the campaign started on; results "
+                   "can't be mixed. Relaunch (another host) or start the campaign fresh.",
+                   err=True)
+        raise typer.Exit(3)
+    return first
 
 
 @app.command()
@@ -450,6 +561,8 @@ def experiment_show(exp_id: str, data_root: Path = DATA_ROOT) -> None:
                    f"{env.provisioning or ''}, image {env.image}, runtime {env.runtime}")
     if ref:
         typer.echo(f"  hardware: {summary(ref)}")
+    if exp.phases:
+        typer.echo("  phases:  " + " ; then ".join(f'--phase "{p}"' for p in exp.phases))
     if exp.runs:
         hours = ex.recorded_hours(ex.load_runs(exp, data_root))
         typer.echo(f"  runs:    {', '.join(exp.runs)} (~{sum(hours.values()):.1f} h measured)")

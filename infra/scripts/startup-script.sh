@@ -35,6 +35,9 @@ finish() {
   STATE="gs://$BUCKET/campaign-state/${CAMPAIGN:-unknown}"
   if [[ $code -eq 0 ]]; then
     echo "done" | gcloud storage cp - "$STATE/DONE" || true
+  elif [[ $code -eq 3 ]]; then
+    # verify-host: this VM's hardware differs from the reference; another host may match.
+    echo "hardware mismatch on $NAME" | gcloud storage cp - "$STATE/HWMISMATCH" || true
   elif (( code < 129 || code > 143 )); then
     # A real failure (not a preemption signal): tell watch.sh not to pay for a relaunch loop.
     echo "exit $code" | gcloud storage cp - "$STATE/FAILED" || true

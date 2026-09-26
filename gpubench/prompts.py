@@ -68,6 +68,12 @@ def ensure_dataset(workload: Workload) -> Path:
     return path
 
 
+def ensure_file(path_str: str, url: str | None, sha256: str, what: str) -> Path:
+    """Local copy of a hash-pinned file (downloaded from `url` if missing)."""
+    return ensure_dataset(Workload(name=what, dataset="custom", input_len=1, output_len=1,
+                                   dataset_path=path_str, dataset_url=url, sha256=sha256))
+
+
 def stage_dataset(workload: Workload, datasets_dir: Path) -> Path:
     """Put the verified prompt file where the load generator reads it (the run's datasets/)."""
     src = ensure_dataset(workload)
@@ -163,8 +169,9 @@ class Renderer:
         env.globals["raise_exception"] = raise_exception
         self.template = env.from_string(template.read_text())
 
-    def render(self, messages: list[dict], tools: list[dict]) -> str:
-        return self.template.render(messages=messages, tools=tools, add_generation_prompt=True)
+    def render(self, messages: list[dict], tools: list[dict], **kwargs) -> str:
+        return self.template.render(messages=messages, tools=tools, add_generation_prompt=True,
+                                    **kwargs)
 
     def count(self, text: str) -> int:
         return len(self.tokenizer.encode(text, add_special_tokens=False).ids)
@@ -175,6 +182,13 @@ def fit_to_tokens(render: Callable[[list[dict]], str], count: Callable[[str], in
     """Make the rendered prompt exactly `target` tokens: drop the oldest turns after the first
     user message while the prompt stays >= target, then trim the largest tool result.
     None if the conversation is too short or exactness can't be reached."""
+    fitted = fit_messages(render, count, messages, target)
+    return fitted[0] if fitted else None
+
+
+def fit_messages(render: Callable[[list[dict]], str], count: Callable[[str], int],
+                 messages: list[dict], target: int) -> tuple[str, list[dict]] | None:
+    """fit_to_tokens, also returning the fitted messages."""
     msgs = [dict(m) for m in messages]
     # End on a tool result / user turn: the model is about to decide its next call.
     while msgs and msgs[-1]["role"] == "assistant":
@@ -219,17 +233,17 @@ def fit_to_tokens(render: Callable[[list[dict]], str], count: Callable[[str], in
         text = render(ms)
         n = count(text)
         if n == target:
-            return text
+            return text, ms
         if n > target:
             return None
         ms[idx]["content"] = " " + ms[idx]["content"]
     return None
 
 
-def build_toolcall_dataset(model: str, tokens: int, count_prompts: int, out: Path,
-                           seed: int = 42, shards: int = 2,
-                           echo: Callable[[str], None] = print) -> str:
-    """Write `count_prompts` prompts of exactly `tokens` tokens to `out`; return its sha256."""
+def fitted_contexts(model: str, tokens: int, count_prompts: int, seed: int, shards: int,
+                    echo: Callable[[str], None] = print):
+    """The deterministic agent contexts behind the tool-calling datasets:
+    yields (renderer, tool, text, messages) for each of `count_prompts` contexts."""
     import pyarrow.parquet as pq
     from huggingface_hub import hf_hub_download
 
@@ -247,9 +261,9 @@ def build_toolcall_dataset(model: str, tokens: int, count_prompts: int, out: Pat
     rng.shuffle(repos)
     echo(f"{sum(len(v) for v in by_repo.values())} sessions from {len(repos)} repositories")
 
-    prompts: list[str] = []
+    made = 0
     for repo in repos:
-        if len(prompts) >= count_prompts:
+        if made >= count_prompts:
             break
         sessions = by_repo[repo][:]
         rng.shuffle(sessions)
@@ -262,13 +276,21 @@ def build_toolcall_dataset(model: str, tokens: int, count_prompts: int, out: Pat
             tool["function"]["description"] = docs
             render = lambda ms, t=tool: renderer.render(ms, [t])  # noqa: E731
             if renderer.count(render(messages)) >= tokens:
-                text = fit_to_tokens(render, renderer.count, messages, tokens)
-                if text is not None:
-                    prompts.append(text)
+                fitted = fit_messages(render, renderer.count, messages, tokens)
+                if fitted is not None:
+                    made += 1
+                    yield renderer, tool, fitted[0], fitted[1]
                 break
-    if len(prompts) < count_prompts:
-        raise RuntimeError(f"only {len(prompts)} prompts reached {tokens} tokens; "
-                           "use more --shards")
+    if made < count_prompts:
+        raise RuntimeError(f"only {made} prompts reached {tokens} tokens; use more --shards")
+
+
+def build_toolcall_dataset(model: str, tokens: int, count_prompts: int, out: Path,
+                           seed: int = 42, shards: int = 2,
+                           echo: Callable[[str], None] = print) -> str:
+    """Write `count_prompts` prompts of exactly `tokens` tokens to `out`; return its sha256."""
+    prompts = [text for _, _, text, _ in
+               fitted_contexts(model, tokens, count_prompts, seed, shards, echo)]
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w") as f:
         for p in prompts:

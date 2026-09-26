@@ -13,6 +13,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from gpubench.config import SLO, Hardware, Parallelism, Precision
+from gpubench.quality import QualityResult
 
 # v2: hardware.provider (was `cloud`), software.runtime, RunResult.complete.
 # v3: experiment, fingerprint, raw_assets, profiles, model.checkpoint, capacity.skipped_levels.
@@ -109,7 +110,7 @@ class SoftwareInfo(BaseModel):
     engine_image: str
     engine_image_digest: str | None = None
     # How vLLM ran: "docker" (engine_image) or "native" (pip vllm==engine_version in a venv).
-    runtime: Literal["docker", "native"] | None = None
+    runtime: Literal["docker", "native", "mock"] | None = None
     lm_eval_version: str | None = None
     gpubench_version: str
     nvidia_driver: str | None = None
@@ -159,6 +160,9 @@ class RunResult(BaseModel):
     fingerprint: dict | None = None
     raw_assets: list[RawAsset] = []
     profiles: list[Profile] = []
+    # Correctness of custom long-context scenarios (gpubench.quality); the baseline that
+    # optimized builds are compared against.
+    quality: list[QualityResult] = []
 
     # Set by the aggregator when separate runs of the same setup (e.g. a perf run plus an
     # accuracy-only re-run) are combined into this one entry.

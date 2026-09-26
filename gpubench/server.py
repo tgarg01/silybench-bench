@@ -23,7 +23,7 @@ import httpx
 from gpubench.config import ServingSession
 from gpubench.paths import engines_dir, uv_cache
 
-Runtime = Literal["docker", "native"]
+Runtime = Literal["docker", "native", "mock"]
 CONTAINER_NAME = "gpubench-vllm"
 KV_CACHE_RE = re.compile(r"KV cache size: ([\d,]+) tokens")
 # One socket per simulated user; the default 1024 fd limit broke a 1024-user probe.
@@ -46,7 +46,7 @@ def docker_has_nvidia() -> bool:
 
 
 def pick_runtime(requested: str = "auto") -> Runtime:
-    if requested in ("docker", "native"):
+    if requested in ("docker", "native", "mock"):
         return requested  # type: ignore[return-value]
     return "docker" if docker_has_nvidia() else "native"
 
@@ -305,8 +305,60 @@ class NativeServer(VllmServer):
                     pass
 
 
+class MockServer(VllmServer):
+    """CI only: gpubench.mock instead of vLLM (no GPU). Its runs can never be submitted."""
+
+    runtime: Runtime = "mock"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._proc: subprocess.Popen | None = None
+
+    @property
+    def raw_dir(self) -> str:
+        return str((self.work_dir / "raw").resolve())
+
+    @property
+    def datasets_dir(self) -> str:
+        return str((self.work_dir / "datasets").resolve())
+
+    def start(self) -> None:
+        import sys
+
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._proc = subprocess.Popen(
+            [sys.executable, "-m", "gpubench.mock", "serve", "--port", str(self.port)],
+            stdout=self.log_path.open("w"), stderr=subprocess.STDOUT,
+        )
+        self._wait_healthy(60)
+        time.sleep(0.5)  # let the startup line reach the log
+
+    def is_running(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def exec(self, args: list[str], **kwargs) -> subprocess.CompletedProcess:
+        import sys
+
+        if args[:3] == ["vllm", "bench", "serve"]:
+            args = [sys.executable, "-m", "gpubench.mock", "bench", *args[3:]]
+        return subprocess.run(args, **kwargs)
+
+    def version(self) -> str | None:
+        return "mock"
+
+    def python_cmd(self) -> list[str]:
+        raise RuntimeError("the mock runtime has no GPU to fingerprint; use --no-fingerprint")
+
+    def stop(self) -> None:
+        if self._proc and self._proc.poll() is None:
+            self._proc.terminate()
+            self._proc.wait(timeout=30)
+
+
 def make_server(
     runtime: Runtime, session: ServingSession, log_path: Path, hf_cache: Path, work_dir: Path
 ) -> VllmServer:
+    if runtime == "mock":
+        return MockServer(session, log_path, hf_cache, work_dir)
     cls = DockerServer if runtime == "docker" else NativeServer
     return cls(session, log_path, hf_cache, work_dir)

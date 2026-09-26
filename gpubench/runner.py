@@ -13,6 +13,8 @@ from gpubench.capacity import capacity_result, find_max_users, kv_cache_max_user
 from gpubench.config import ServingSession
 from gpubench.perf import make_point_runner
 from gpubench.progress import Progress
+from gpubench.prompts import ensure_file
+from gpubench.quality import run_quality
 from gpubench.schema import ModelInfo, PerfPoint, RunResult, SoftwareInfo
 from gpubench.server import Runtime, make_server
 from gpubench.storage import upload_result
@@ -86,6 +88,7 @@ def run_session(
     progress: Progress | None = None,
     experiment: str | None = None,
     fingerprint: dict | None = None,
+    quality: bool = True,
 ) -> RunResult:
     cfg = session.config
     hw = session.hardware
@@ -161,7 +164,7 @@ def run_session(
         perf = cfg.perf
         done_workloads = {c.workload for c in result.capacity}
         # A failing workload or task is logged and skipped so the rest of the campaign still runs.
-        for workload in perf.workloads:
+        for workload in perf.workloads if perf.enabled else []:
             if workload.name in done_workloads:
                 log.info("perf %s already measured; skipping", workload.name)
                 continue
@@ -194,6 +197,26 @@ def run_session(
                 save()
             except Exception:
                 log.exception("FAILED perf workload %s; continuing", workload.name)
+
+        # Correctness of custom long-context workloads, while the same server is up.
+        done_quality = {q.workload for q in result.quality}
+        for workload in perf.workloads:
+            suite = workload.quality
+            if suite is None or not quality or workload.name in done_quality:
+                continue
+            progress.update(stage="quality", detail=workload.name)
+            try:
+                dataset = ensure_file(suite.dataset_path, suite.dataset_url, suite.sha256,
+                                      f"{workload.name}-quality")
+                kv_users = kv_cache_max_users(result.kv_cache_tokens, workload) or 1
+                result.quality.append(run_quality(
+                    server.base_url, session.served_model, workload.name, dataset, work_dir,
+                    concurrency=max(1, min(4, kv_users)),
+                    recall_max_tokens=suite.recall_max_tokens,
+                    drift_max_tokens=suite.drift_max_tokens, echo=log.info))
+                save()
+            except Exception:
+                log.exception("FAILED quality suite of %s; continuing", workload.name)
 
         if cfg.accuracy.enabled:
             done_tasks = {a.task for a in result.accuracy}

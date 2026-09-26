@@ -129,6 +129,8 @@ def check_result(result: RunResult, allow_incomplete: bool = False) -> list[str]
     problems = []
     if result.sample:
         problems.append("sample (synthetic) data")
+    if result.software.runtime == "mock":
+        problems.append("mock runtime (CI pipeline test, not a GPU measurement)")
     if result.campaign == "smoke":
         problems.append("smoke-test campaign (pipeline check, not a benchmark)")
     if not result.complete and not allow_incomplete:

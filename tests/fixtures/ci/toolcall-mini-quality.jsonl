@@ -1,0 +1,6 @@
+{"id": "drift-0", "kind": "drift", "context": 0, "prompt": "context 0"}
+{"id": "recall-0", "kind": "recall", "context": 0, "prompt": "context 0 question", "expected": "mock answer", "cmd": "ls", "depth": 0.5}
+{"id": "drift-1", "kind": "drift", "context": 1, "prompt": "context 1"}
+{"id": "recall-1", "kind": "recall", "context": 1, "prompt": "context 1 question", "expected": "mock answer", "cmd": "ls", "depth": 0.5}
+{"id": "drift-2", "kind": "drift", "context": 2, "prompt": "context 2"}
+{"id": "recall-2", "kind": "recall", "context": 2, "prompt": "context 2 question", "expected": "mock answer", "cmd": "ls", "depth": 0.5}

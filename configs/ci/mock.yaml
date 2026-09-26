@@ -1,0 +1,34 @@
+# CI only: the AGENTS.md flow against the GPU-free mock runtime (gpubench.mock).
+# Same shape as a real experiment: a random scenario plus a custom-dataset scenario with its
+# quality suite. Runs made with it are rejected by `gpubench submit`.
+name: ci-mock
+engine:
+  image: vllm/vllm-openai:v0.30.0
+models:
+  - hf_id: silybench/mock-8B
+    precisions: [bf16]
+    max_model_len: 4096
+perf:
+  workloads:
+    - name: toolcall-mini
+      dataset: custom
+      input_len: 50
+      output_len: 16
+      dataset_path: tests/fixtures/ci/toolcall-mini.jsonl
+      sha256: 96861180aa731600d052492091c7d2147bff0522f5c40753502681c7360bc717
+      concurrency: [1, 2]
+      min_prompts: 4
+      num_warmups: 0
+      slo: {ttft_p99_ms: 30000, itl_median_ms: 50}
+      quality:
+        dataset_path: tests/fixtures/ci/toolcall-mini-quality.jsonl
+        sha256: b588ef003fd186ca82b6c1aa60e718c3a888586fd5bffcc919f4d8be584e55b5
+    - {name: chat-32-32, input_len: 32, output_len: 32}
+  concurrency: [1, 16, 128]
+  prompts_per_user: 1
+  min_prompts: 8
+  repeats: 1
+  num_warmups: 0
+  capacity: {resolution: 16, max_iterations: 3}
+accuracy:
+  enabled: false

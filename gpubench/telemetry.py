@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -87,6 +88,9 @@ class GpuSampler:
 
     def __enter__(self) -> GpuSampler:
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
+        if shutil.which("nvidia-smi") is None:  # CI mock runs: no GPU, no telemetry
+            self.out_path.write_text("")
+            return self
         self._proc = subprocess.Popen(
             [
                 "nvidia-smi", f"--query-gpu={query_fields()}",

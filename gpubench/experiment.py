@@ -58,6 +58,8 @@ class Experiment(BaseModel):
     # Generated from the config by `gpubench experiment manifest` (shown before results exist).
     models: list[dict] = []
     scenarios: list[dict] = []
+    # Run order: each entry is a set of `gpubench run` filters (watch.sh --phase), in order.
+    phases: list[str] = []
 
 
 @dataclass
@@ -275,7 +277,8 @@ def manifest_from_config(cfg) -> dict:
         "scenarios": [
             {"name": w.name, "input_len": w.input_len, "output_len": w.output_len,
              "dataset": w.dataset, "users": perf.concurrency_for(w),
-             "repeats": perf.repeats_for(w), "slo": perf.slo_for(w).model_dump()}
+             "repeats": perf.repeats_for(w), "slo": perf.slo_for(w).model_dump(),
+             "quality": w.quality is not None}
             for w in perf.workloads
         ],
     }

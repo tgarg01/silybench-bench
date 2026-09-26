@@ -19,11 +19,6 @@ models:
       tool-call-parser: qwen3_xml
 perf:
   workloads:
-    - {name: chat-128-128, input_len: 128, output_len: 128}
-    - {name: prefill-1024-128, input_len: 1024, output_len: 128}
-    - {name: decode-128-1024, input_len: 128, output_len: 1024}
-    - {name: balanced-2048-2048, input_len: 2048, output_len: 2048}
-    - {name: longctx-8192-512, input_len: 8192, output_len: 512}
     # Real tool-calling agent contexts (SWE-agent sessions, exactly 100k tokens each).
     # A 100k prompt alone takes ~10 s to read, so first token is held to 30 s here.
     - name: toolcall-100k-512
@@ -37,6 +32,17 @@ perf:
       min_prompts: 10
       num_warmups: 1
       slo: {ttft_p99_ms: 30000, itl_median_ms: 50}
+      # Correctness (the perf run forces 512 output tokens, so it can't tell): 100 exact-answer
+      # recall questions about tool outputs deep in the context + 100 drift decision points.
+      quality:
+        dataset_path: datasets/toolcall-100k-quality.jsonl
+        dataset_url: https://github.com/tgarg01/silybench-data/releases/download/exp-2026-10-qwen3.8-27b-h100/toolcall-100k-quality.jsonl
+        sha256: 2cf0a857ef5f9f37a5430dc683e4853a14084c308322620b8401ad3e62e7df3f
+    - {name: chat-128-128, input_len: 128, output_len: 128}
+    - {name: prefill-1024-128, input_len: 1024, output_len: 128}
+    - {name: decode-128-1024, input_len: 128, output_len: 1024}
+    - {name: balanced-2048-2048, input_len: 2048, output_len: 2048}
+    - {name: longctx-8192-512, input_len: 8192, output_len: 512}
   concurrency: [1, 4, 16, 32, 64, 128, 256, 512]
   repeats: 3
   slo:
