@@ -58,7 +58,7 @@ def stage_runs(run_dirs: list[Path], dest: Path, allow_incomplete: bool) -> list
     return results
 
 
-def pr_body(results: list[RunResult]) -> str:
+def pr_body(results: list[RunResult], extra: str = "") -> str:
     hw = results[0].hardware
     lines = [
         f"Benchmark runs from `gpubench submit` on **{hw.gpu_count}x {hw.gpu_type}** "
@@ -78,6 +78,8 @@ def pr_body(results: list[RunResult]) -> str:
     acc = {(r.model.precision, a.task): a.value for r in results for a in r.accuracy}
     if acc:
         lines += ["", "Accuracy: " + ", ".join(f"{p}/{t} {v:.3f}" for (p, t), v in acc.items())]
+    if extra:
+        lines += ["", extra]
     lines += ["", f"bench commit: `{results[0].git_commit}`",
               "", "🤖 Submitted with [silybench](https://github.com/tgarg01/silybench-bench)"]
     return "\n".join(lines)
@@ -108,12 +110,13 @@ def submit_runs(
     stage: Path,
     allow_incomplete: bool = False,
     echo: Callable[[str], None] = print,
+    extra: str = "",
 ) -> str:
     if dry_run:
         if stage.exists():
             shutil.rmtree(stage)
         results = stage_runs(run_dirs, stage, allow_incomplete)
-        (stage / "PR_BODY.md").write_text(pr_body(results))
+        (stage / "PR_BODY.md").write_text(pr_body(results, extra))
         for f in sorted(stage.rglob("*")):
             if f.is_file():
                 echo(f"  {f.relative_to(stage)}  ({f.stat().st_size / 1e3:.0f} kB)")
@@ -148,7 +151,9 @@ def submit_runs(
         hw = results[0].hardware
         title = (f"Add {len(results)} run(s): {results[0].model.hf_id} on "
                  f"{hw.gpu_count}x {hw.gpu_type} ({hw.provider})")
+        if results[0].experiment:
+            title = f"Reproduction of {results[0].experiment}: " + title
         _git(*ident, "commit", "-m", title, cwd=repo_dir)
         _git("push", "-u", "origin", branch, cwd=repo_dir)
         return _gh("pr", "create", "--repo", data_repo, "--head", f"{head_prefix}{branch}",
-                   "--title", title, "--body", pr_body(results), cwd=repo_dir)
+                   "--title", title, "--body", pr_body(results, extra), cwd=repo_dir)

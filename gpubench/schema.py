@@ -14,8 +14,10 @@ from pydantic import BaseModel
 
 from gpubench.config import SLO, Hardware, Parallelism, Precision
 
-# v2: hardware.provider (was `cloud`), software.runtime, RunResult.complete. v1 files still load.
-SCHEMA_VERSION = 2
+# v2: hardware.provider (was `cloud`), software.runtime, RunResult.complete.
+# v3: experiment, fingerprint, raw_assets, profiles, model.checkpoint, capacity.skipped_levels.
+# Older files still load (every new field has a default).
+SCHEMA_VERSION = 3
 
 
 class Percentiles(BaseModel):
@@ -58,6 +60,8 @@ class PerfPoint(BaseModel):
     avg_power_w: float | None = None
     peak_memory_gb: float | None = None
     output_tokens_per_joule: float | None = None
+    max_gpu_temp_c: float | None = None
+    thermal_throttle_fraction: float | None = None  # 0 = never slowed down for heat
     usd_per_1m_output_tokens: float | None = None
 
     slo_pass: bool
@@ -75,6 +79,9 @@ class CapacityResult(BaseModel):
     output_throughput_at_max_users: float | None
     # Concurrency levels actually measured during the search, for transparency.
     probed: dict[int, bool]
+    # Sweep levels not run because they exceed the KV-cache limit several times over
+    # (requests would only queue); see PerfConfig.max_kv_multiple.
+    skipped_levels: list[int] = []
 
 
 class AccuracyResult(BaseModel):
@@ -88,8 +95,9 @@ class AccuracyResult(BaseModel):
 
 
 class ModelInfo(BaseModel):
-    hf_id: str
-    revision: str  # resolved commit sha when available
+    hf_id: str  # base model
+    checkpoint: str | None = None  # repo actually served when it differs (e.g. an FP8 checkpoint)
+    revision: str  # resolved commit sha of the served repo when available
     precision: Precision
     max_model_len: int
     thinking: bool
@@ -108,6 +116,26 @@ class SoftwareInfo(BaseModel):
     cuda_version: str | None = None
 
 
+class RawAsset(BaseModel):
+    """A published file with everything captured by a run (GitHub release asset)."""
+
+    name: str
+    url: str
+    sha256: str
+    bytes: int
+    contents: str  # e.g. "full run directory incl. per-question accuracy samples"
+
+
+class Profile(BaseModel):
+    """An Nsight profile of one load point. `summary` is tool-specific, small JSON."""
+
+    tool: Literal["nsys", "ncu"]
+    workload: str
+    concurrency: int
+    summary: dict = {}
+    asset: str | None = None  # name of the RawAsset holding the .nsys-rep / .ncu-rep
+
+
 class RunResult(BaseModel):
     schema_version: int = SCHEMA_VERSION
     run_id: str
@@ -116,6 +144,7 @@ class RunResult(BaseModel):
     git_commit: str | None  # silybench-bench commit that produced this run
     config_hash: str
     sample: bool = False  # True = synthetic placeholder data, never real measurements
+    experiment: str | None = None  # published experiment id (silybench-data experiments/)
     # False while the run is in progress (or if it died); `--resume` continues such runs.
     complete: bool = True
 
@@ -125,6 +154,11 @@ class RunResult(BaseModel):
     model: ModelInfo
     serving_args: list[str]
     kv_cache_tokens: int | None = None
+    # Hardware fingerprint of the machine (gpubench.fingerprint); the reference an
+    # experiment's reproductions are checked against.
+    fingerprint: dict | None = None
+    raw_assets: list[RawAsset] = []
+    profiles: list[Profile] = []
 
     # Set by the aggregator when separate runs of the same setup (e.g. a perf run plus an
     # accuracy-only re-run) are combined into this one entry.

@@ -1,0 +1,36 @@
+<?xml version="1.0" ?>
+<nvidia_smi_log>
+  <driver_version>580.173.02</driver_version>
+  <cuda_version>13.0</cuda_version>
+  <attached_gpus>1</attached_gpus>
+  <gpu id="00000000:04:00.0">
+    <product_name>NVIDIA H100 80GB HBM3</product_name>
+    <product_architecture>Hopper</product_architecture>
+    <persistence_mode>Enabled</persistence_mode>
+    <mig_mode><current_mig>Disabled</current_mig><pending_mig>Disabled</pending_mig></mig_mode>
+    <serial>1652123456789</serial>
+    <uuid>GPU-11111111-2222-3333-4444-555555555555</uuid>
+    <vbios_version>96.00.99.00.01</vbios_version>
+    <pci>
+      <pci_device_id>233010DE</pci_device_id>
+      <pci_sub_system_id>16C110DE</pci_sub_system_id>
+      <pci_gpu_link_info>
+        <pcie_gen><max_link_gen>5</max_link_gen><current_link_gen>5</current_link_gen></pcie_gen>
+        <link_widths><max_link_width>16x</max_link_width><current_link_width>16x</current_link_width></link_widths>
+      </pci_gpu_link_info>
+    </pci>
+    <clocks_event_reasons>
+      <clocks_event_reasons_gpu_idle>Active</clocks_event_reasons_gpu_idle>
+      <clocks_event_reasons_sw_power_cap>Not Active</clocks_event_reasons_sw_power_cap>
+      <clocks_event_reasons_sw_thermal_slowdown>Not Active</clocks_event_reasons_sw_thermal_slowdown>
+    </clocks_event_reasons>
+    <fb_memory_usage><total>81559 MiB</total><used>1 MiB</used></fb_memory_usage>
+    <ecc_mode><current_ecc>Enabled</current_ecc><pending_ecc>Enabled</pending_ecc></ecc_mode>
+    <temperature><gpu_temp>31 C</gpu_temp><memory_temp>38 C</memory_temp></temperature>
+    <gpu_power_readings>
+      <default_power_limit>700.00 W</default_power_limit>
+      <enforced_power_limit>700.00 W</enforced_power_limit>
+    </gpu_power_readings>
+    <max_clocks><sm_clock>1980 MHz</sm_clock><mem_clock>2619 MHz</mem_clock></max_clocks>
+  </gpu>
+</nvidia_smi_log>

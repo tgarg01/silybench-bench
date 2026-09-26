@@ -56,7 +56,7 @@ def lm_eval_cmd(session: ServingSession, task: AccuracyTask, output_dir: Path) -
     acc = session.config.accuracy
     port = session.config.engine.port
     model_args = ",".join([
-        f"model={session.model.hf_id}",
+        f"model={session.served_model}",
         f"base_url=http://localhost:{port}/v1/chat/completions",
         f"num_concurrent={acc.num_concurrent}",
         "max_retries=3",

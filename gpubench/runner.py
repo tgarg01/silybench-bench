@@ -84,6 +84,8 @@ def run_session(
     runtime: Runtime = "docker",
     resume: bool = False,
     progress: Progress | None = None,
+    experiment: str | None = None,
+    fingerprint: dict | None = None,
 ) -> RunResult:
     cfg = session.config
     hw = session.hardware
@@ -112,6 +114,8 @@ def run_session(
             git_commit=git_commit(),
             config_hash=cfg.config_hash(),
             complete=False,
+            experiment=experiment,
+            fingerprint=fingerprint,
             hardware=hw,
             parallelism=cfg.parallelism,
             software=SoftwareInfo(
@@ -124,7 +128,8 @@ def run_session(
             ),
             model=ModelInfo(
                 hf_id=session.model.hf_id,
-                revision=resolve_revision(session.model.hf_id, session.model.revision),
+                checkpoint=session.served_model if session.prequantized else None,
+                revision=resolve_revision(session.served_model, session.model.revision),
                 precision=session.precision,
                 max_model_len=session.model.max_model_len,
                 thinking=session.model.thinking,
@@ -137,7 +142,7 @@ def run_session(
         # dropped SSH session loses at most one point; `--resume` picks up from here.
         (work_dir / "result.json").write_text(result.model_dump_json(indent=2))
         if bucket:
-            upload_result(work_dir, bucket)
+            upload_result(work_dir, bucket, cfg.name)
 
     save()
     progress.update(run_id=result.run_id, session=session.session_id, stage="starting vLLM")
@@ -171,15 +176,20 @@ def run_session(
                     save()
                     return point
 
-                sweep = {c: measure_and_save(c) for c in perf.concurrency}
                 kv_users = kv_cache_max_users(result.kv_cache_tokens, workload)
+                levels, skipped = perf.levels(workload, kv_users)
+                if skipped:
+                    log.info("%s: skipping %s users (> %sx the %s that fit in the KV cache)",
+                             workload.name, skipped, perf.max_kv_multiple, kv_users)
+                sweep = {c: measure_and_save(c) for c in levels}
                 max_users, points = find_max_users(
                     sweep, lambda c: measure_and_save(c, phase="probe"), perf.capacity,
                     ceiling=2 * kv_users if kv_users else None,
                 )
-                result.capacity.append(
-                    capacity_result(workload, perf.slo, max_users, points, result.kv_cache_tokens)
-                )
+                cap = capacity_result(workload, perf.slo_for(workload), max_users, points,
+                                      result.kv_cache_tokens)
+                cap.skipped_levels = skipped
+                result.capacity.append(cap)
                 log.info("capacity %s: %d users (SLO)", workload.name, max_users)
                 save()
             except Exception:

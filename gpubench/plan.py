@@ -37,6 +37,54 @@ ACCURACY_MINUTES = {
 }
 DEFAULT_ACCURACY_MINUTES = 15
 PROBES_PER_WORKLOAD = 3
+PREFILL_FLOPS = 4.0e14  # effective dense BF16 FLOP/s of an H100 on long prefills
+ACTIVATIONS_GB = 4.0  # vLLM's activation / CUDA-graph reserve
+
+
+@dataclass
+class ModelProfile:
+    """What the planner needs from a model's config: size and memory per request."""
+
+    params: float
+    kv_bytes_per_token: float | None  # None = unknown (fall back to the calibrated constant)
+    state_bytes_per_seq: float = 0.0  # fixed recurrent state of linear-attention layers
+
+
+_PROFILE_CACHE: dict[str, ModelProfile] = {}
+
+
+def model_profile(hf_id: str) -> ModelProfile:
+    """Read params and KV/state sizes from the Hub (config.json, safetensors metadata).
+
+    Handles hybrid models (e.g. Qwen3.5/3.8: only every 4th layer keeps a KV cache, the rest
+    carry a fixed-size recurrent state). Offline, falls back to the name ("27B") heuristic.
+    """
+    if hf_id in _PROFILE_CACHE:
+        return _PROFILE_CACHE[hf_id]
+    profile = ModelProfile(params=model_params_b(hf_id) * 1e9, kv_bytes_per_token=None)
+    try:
+        import httpx
+
+        info = httpx.get(f"https://huggingface.co/api/models/{hf_id}", timeout=15).json()
+        if total := (info.get("safetensors") or {}).get("total"):
+            profile.params = float(total)
+        cfg = httpx.get(f"https://huggingface.co/{hf_id}/resolve/main/config.json",
+                        follow_redirects=True, timeout=15).json()
+        t = cfg.get("text_config", cfg)
+        layer_types = t.get("layer_types") or ["full_attention"] * t["num_hidden_layers"]
+        full = sum(lt == "full_attention" for lt in layer_types)
+        linear = sum(lt == "linear_attention" for lt in layer_types)
+        head_dim = t.get("head_dim") or t["hidden_size"] // t["num_attention_heads"]
+        kv_heads = t.get("num_key_value_heads", t["num_attention_heads"])
+        profile.kv_bytes_per_token = 2 * full * kv_heads * head_dim * 2  # K+V, 16-bit
+        if linear:
+            profile.state_bytes_per_seq = (linear * t.get("linear_num_value_heads", 0)
+                                           * t.get("linear_key_head_dim", 0)
+                                           * t.get("linear_value_head_dim", 0) * 2)
+    except Exception:
+        pass
+    _PROFILE_CACHE[hf_id] = profile
+    return profile
 
 
 def model_params_b(hf_id: str) -> float:
@@ -73,15 +121,18 @@ class Estimate:
 
 
 def _point_seconds(session: ServingSession, wl: Workload, c: int, base_itl_s: float,
-                   kv_users: int) -> float:
+                   kv_users: int, params: float = 8e9, gpus: int = 1,
+                   context_scale: float = CONTEXT_SCALE) -> float:
     perf = session.config.perf
     in_len, out_len = wl.input_len or 512, wl.output_len or 256
     active = max(1, min(c, kv_users))
     context = in_len + out_len / 2
-    itl = base_itl_s * (1 + active * context / CONTEXT_SCALE) * (1 + active / 400)
-    prompts = perf.num_prompts(c)
+    itl = base_itl_s * (1 + active * context / context_scale) * (1 + active / 400)
+    prompts = perf.num_prompts(c, wl)
     decode = prompts * out_len * itl / active
-    return perf.repeats * (decode + OVERHEAD_S_PER_REPEAT)
+    # Prefill is compute-bound and serialises across requests; it only matters for long inputs.
+    prefill = prompts * 2 * params * in_len / (PREFILL_FLOPS * gpus) if in_len >= 4096 else 0.0
+    return perf.repeats_for(wl) * (decode + prefill + OVERHEAD_S_PER_REPEAT)
 
 
 def estimate(cfg: BenchConfig) -> Estimate:
@@ -96,22 +147,34 @@ def estimate(cfg: BenchConfig) -> Estimate:
     points = 0
     sessions = cfg.sessions()
     for s in sessions:
-        params = model_params_b(s.model.hf_id) * 1e9
+        prof = model_profile(s.model.hf_id)
+        params = prof.params
         weight_bytes = params * BYTES_PER_PARAM[s.precision]
+        stored_bytes = params * (1.05 if s.precision == "fp8" else 2.0)
         base_itl = weight_bytes / bw
-        free_gb = max(1.0, mem_gb * gpus * s.model.gpu_memory_utilization - weight_bytes / 1e9)
-        # FP8 weights leave more room, and 8B-class models' KV per token scales with size.
-        kv_tokens = free_gb * KV_TOKENS_PER_GB * (8e9 / params) ** 0.5
+        free_gb = max(1.0, mem_gb * gpus * s.model.gpu_memory_utilization
+                      - stored_bytes / 1e9 - ACTIVATIONS_GB)
         speed = 6.8e-3 / base_itl  # relative to Qwen3-8B BF16 on one H100
+        # Hybrid models keep KV for few layers, so latency grows much less with context.
+        context_scale = CONTEXT_SCALE
+        if prof.kv_bytes_per_token:
+            context_scale = CONTEXT_SCALE * 147456 / prof.kv_bytes_per_token  # Qwen3-8B = 144 KiB
         for wl in cfg.perf.workloads:
             per_req = (wl.input_len or 512) + (wl.output_len or 256)
-            kv_users = max(1, int(kv_tokens // per_req))
-            levels = list(cfg.perf.concurrency)
+            if prof.kv_bytes_per_token:
+                kv_users = max(1, int(free_gb * 1e9 // (per_req * prof.kv_bytes_per_token
+                                                         + prof.state_bytes_per_seq)))
+            else:
+                # Calibrated on Qwen3-8B BF16; KV per token scales roughly with model size.
+                kv_tokens = free_gb * KV_TOKENS_PER_GB * (8e9 / params) ** 0.5
+                kv_users = max(1, int(kv_tokens // per_req))
+            levels, _ = cfg.perf.levels(wl, kv_users)
             if cfg.perf.capacity.enabled:
                 # Probes land near the capacity limit; approximate them at the KV limit.
-                levels += [min(kv_users, max(levels))] * PROBES_PER_WORKLOAD
+                levels = levels + [min(kv_users, max(levels))] * PROBES_PER_WORKLOAD
             for c in levels:
-                perf_s += _point_seconds(s, wl, c, base_itl, kv_users)
+                perf_s += _point_seconds(s, wl, c, base_itl, kv_users, params, gpus,
+                                         context_scale)
                 points += 1
         if cfg.accuracy.enabled:
             for t in cfg.accuracy.tasks:

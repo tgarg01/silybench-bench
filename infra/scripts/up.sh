@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bundle the repo, upload it to GCS and create a benchmark VM that runs CONFIG.
 # GCP only (Terraform-managed Spot VM). For any other provider, see AGENTS.md.
-#   infra/scripts/up.sh h100-1g configs/smoke.yaml [--keep] [--hours N] [--zone Z] [--yes] [--flex [WAIT]]
+#   infra/scripts/up.sh h100-1g configs/smoke.yaml [--keep] [--image IMAGE] [--experiment ID] [--hours N] [--zone Z] [--yes] [--flex [WAIT]]
 #                        [--run-args "--precision fp8 --workload chat-128-128 --skip-accuracy"]
 # --keep:  don't delete the VM when the run ends (debugging). Always run down.sh after.
 # --zone:  override the env's zone (e.g. when Spot capacity is exhausted in one zone).
@@ -20,6 +20,9 @@ ZONE=""
 APPROVE=""
 FLEX=""
 RUN_ARGS=""
+IMAGE=""
+EXPERIMENT=""
+RELAUNCH=false
 while [[ $# -gt 0 ]]; do
   case $1 in
     --keep) SELF_DELETE=false; shift ;;
@@ -27,6 +30,9 @@ while [[ $# -gt 0 ]]; do
     --zone) ZONE=$2; shift 2 ;;
     --yes) APPROVE=-auto-approve; shift ;;
     --run-args) RUN_ARGS=$2; shift 2 ;;
+    --image) IMAGE=$2; shift 2 ;;
+    --experiment) EXPERIMENT=$2; shift 2 ;;
+    --relaunch) RELAUNCH=true; shift ;;
     --flex)
       FLEX=2h
       if [[ ${2:-} =~ ^[0-9]+[hms] ]]; then FLEX=$2; shift; fi
@@ -52,6 +58,13 @@ CODE_URI="gs://$BUCKET/code/$CAMPAIGN-$STAMP.tgz"
 # shellcheck disable=SC2086
 (cd "$ROOT" && PYTHONPATH=. uv run python -m gpubench.cli validate "$ROOT/$CONFIG" $RUN_ARGS)
 
+CAMPAIGN_NAME=$(cd "$ROOT" && PYTHONPATH=. uv run python -c "from gpubench.config import load_config; print(load_config('$ROOT/$CONFIG').name)")
+if [[ $RELAUNCH != true ]]; then
+  # A new launch of this campaign: forget a previous run's completion marker.
+  gcloud storage rm "gs://$BUCKET/campaign-state/$CAMPAIGN_NAME/DONE" \
+    "gs://$BUCKET/campaign-state/$CAMPAIGN_NAME/FAILED" 2>/dev/null || true
+fi
+
 echo "bundling repo -> $CODE_URI"
 # The bundle has no .git, so record the commit (+dirty flag) for result provenance.
 COMMIT=$(git -C "$ROOT" rev-parse --verify -q HEAD || echo uncommitted)
@@ -69,7 +82,8 @@ ZONE=${ZONE:-$(sed -n 's/^zone *= *"\(.*\)"/\1/p' "$TF/terraform.tfvars")}
 PROVISIONING=spot
 [[ -n $FLEX ]] && PROVISIONING=flex-start
 # Hardware provenance for result.json (GPUs themselves are detected on the VM).
-RUN_ARGS="--provider gcp --provisioning $PROVISIONING --machine-type $MACHINE --zone $ZONE${PRICE:+ --price-per-hour $PRICE} $RUN_ARGS"
+RUN_ARGS="--provider gcp --provisioning $PROVISIONING --machine-type $MACHINE --zone $ZONE${PRICE:+ --price-per-hour $PRICE}${EXPERIMENT:+ --experiment $EXPERIMENT} $RUN_ARGS"
+IMAGE=${IMAGE:-$(sed -n '/variable "image"/,/}/s/^ *default *= *"\(.*\)"/\1/p' "$TF/variables.tf")}
 
 if [[ -n $FLEX ]]; then
   PROJECT=$(sed -n 's/^project_id *= *"\(.*\)"/\1/p' "$TF/terraform.tfvars")
@@ -80,13 +94,13 @@ if [[ -n $FLEX ]]; then
     --provisioning-model FLEX_START --request-valid-for-duration "$FLEX" \
     --max-run-duration "${HOURS}h" --instance-termination-action DELETE \
     --maintenance-policy TERMINATE --reservation-affinity none \
-    --image-family common-cu129-ubuntu-2404-nvidia-580 --image-project deeplearning-platform-release \
+    --image "$IMAGE" --image-project deeplearning-platform-release \
     --boot-disk-size 200GB --boot-disk-type pd-balanced \
     --network-interface nic-type=GVNIC,network=default \
     --service-account "gpubench-runner@$PROJECT.iam.gserviceaccount.com" --scopes cloud-platform \
     --tags gpubench --labels "app=gpubench,campaign=$CAMPAIGN,provisioning=flex-start" \
     --metadata-from-file startup-script="$ROOT/infra/scripts/startup-script.sh" \
-    --metadata "gpubench-code-uri=$CODE_URI,gpubench-config=$CONFIG,gpubench-bucket=$BUCKET,gpubench-self-delete=$SELF_DELETE,gpubench-run-args=$RUN_ARGS,enable-oslogin=TRUE"
+    --metadata "gpubench-code-uri=$CODE_URI,gpubench-config=$CONFIG,gpubench-bucket=$BUCKET,gpubench-self-delete=$SELF_DELETE,gpubench-run-args=$RUN_ARGS,gpubench-image=$IMAGE,enable-oslogin=TRUE"
 else
   terraform -chdir="$TF" init -input=false -upgrade >/dev/null
   terraform -chdir="$TF" apply $APPROVE \
@@ -96,7 +110,8 @@ else
     -var "config_path=$CONFIG" \
     -var "max_run_hours=$HOURS" \
     -var "self_delete=$SELF_DELETE" \
-    -var "run_args=$RUN_ARGS"
+    -var "run_args=$RUN_ARGS" \
+    -var "image=$IMAGE"
 fi
 
 echo

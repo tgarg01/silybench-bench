@@ -26,6 +26,23 @@ from gpubench.schema import RunResult
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 app.add_typer(dataset_app, name="dataset")
+prompts_app = typer.Typer(no_args_is_help=True, help="Build prompt datasets for custom workloads.")
+app.add_typer(prompts_app, name="prompts")
+
+
+@prompts_app.command("make-toolcall")
+def make_toolcall(
+    model: str = typer.Option(..., help="HF model whose tokenizer and chat template to use"),
+    tokens: int = typer.Option(100_000, help="Exact prompt length in tokens"),
+    count: int = typer.Option(200, help="Number of prompts"),
+    out: Path = typer.Option(Path("datasets/toolcall-100k.jsonl")),
+    shards: int = typer.Option(2, help="Source parquet shards to read (of 12, ~440 MB each)"),
+    seed: int = typer.Option(42),
+) -> None:
+    """Build the long-context tool-calling prompts from real SWE-agent sessions."""
+    from gpubench.prompts import build_toolcall_dataset
+
+    build_toolcall_dataset(model, tokens, count, out, seed=seed, shards=shards, echo=typer.echo)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_REPO = "tgarg01/silybench-data"
@@ -78,12 +95,15 @@ def validate(
     """Validate a config and print the sessions and perf points it expands to."""
     cfg = filter_config(load_config(config), precision, workload, skip_accuracy, skip_perf)
     perf = cfg.perf
-    points = len(perf.workloads) * len(perf.concurrency)
     typer.echo(f"campaign {cfg.name}")
+    for w in perf.workloads:
+        slo = perf.slo_for(w)
+        typer.echo(f"  workload {w.name}: {w.input_len} in / {w.output_len} out ({w.dataset}), "
+                   f"users {perf.concurrency_for(w)} x {perf.repeats_for(w)} repeats, "
+                   f"SLO TTFT p99 <= {slo.ttft_p99_ms:g} ms, ITL <= {slo.itl_median_ms:g} ms")
     for s in cfg.sessions():
         typer.echo(f"  session {s.session_id}")
-        typer.echo(f"    vllm serve {s.model.hf_id} {' '.join(s.vllm_args())}")
-        typer.echo(f"    perf: {points} sweep points x {perf.repeats} repeats (+ capacity search)")
+        typer.echo(f"    vllm serve {s.served_model} {' '.join(s.vllm_args())}")
         tasks = [t.name for t in cfg.accuracy.tasks] if cfg.accuracy.enabled else []
         typer.echo(f"    accuracy: {', '.join(tasks) or 'disabled'}")
 
@@ -123,6 +143,7 @@ def resolve_hardware(
 
 PROVIDER = typer.Option(None, help="Where this GPU is rented: runpod, lambda, vast, gcp, ...")
 PRICE = typer.Option(None, "--price-per-hour", help="USD/h for the whole machine")
+DATA_ROOT = typer.Option(None, help="Local silybench-data checkout (default: GitHub)")
 PROVISIONING = typer.Option(None, help="on-demand (default), spot, reserved or flex-start")
 GPU_TYPE = typer.Option(None, help="Override the detected GPU type, e.g. H100-80GB")
 GPU_COUNT = typer.Option(None, help="Override the detected GPU count")
@@ -138,11 +159,30 @@ def plan(
     workload: list[str] = typer.Option(None),
     skip_accuracy: bool = typer.Option(False),
     skip_perf: bool = typer.Option(False),
+    experiment: str = typer.Option(None, help="Reproducing this experiment: use its recorded "
+                                   "durations instead of the model"),
+    data_root: Path = DATA_ROOT,
 ) -> None:
     """Estimate how long a campaign takes and what it costs, before starting it."""
     from gpubench.config import Hardware
     from gpubench.hardware import detect_hardware
     from gpubench.plan import estimate, format_estimate
+
+    if experiment:
+        from gpubench import experiment as ex
+
+        exp, _ = ex.load_experiment(experiment, data_root)
+        runs = [r for r in ex.load_runs(exp, data_root)
+                if not precision or r.model.precision in precision]
+        hours = ex.recorded_hours(runs)
+        for run_id, h in hours.items():
+            typer.echo(f"  {run_id}: {h:.1f} h")
+        total = sum(hours.values())
+        typer.echo(f"TOTAL {total:.1f} h, as measured when {experiment} ran")
+        if price_per_hour:
+            typer.echo(f"GPU cost ~${total * price_per_hour:.0f} at ${price_per_hour}/h "
+                       "(+ model download; Spot preemptions add restarts)")
+        return
 
     cfg = filter_config(load_config(config), precision, workload, skip_accuracy, skip_perf)
     try:
@@ -193,6 +233,8 @@ def run(
     workload: list[str] = typer.Option(None, help="Only these perf workloads (repeatable)"),
     skip_accuracy: bool = typer.Option(False, help="Skip the accuracy suite"),
     skip_perf: bool = typer.Option(False, help="Skip performance (accuracy-only re-run)"),
+    experiment: str = typer.Option(None, help="Experiment id these runs belong to"),
+    no_fingerprint: bool = typer.Option(False, help="Skip the hardware fingerprint"),
 ) -> None:
     """Run a campaign on this machine (needs NVIDIA GPUs; Docker optional)."""
     from gpubench.plan import estimate
@@ -234,11 +276,28 @@ def run(
     progress = Progress(out / "progress.json")
     progress.start_campaign(cfg.name, [s.session_id for s in cfg.sessions()], est.perf_points,
                             round(est.hours, 1), hw.price_per_hour_usd)
+    fp = None if no_fingerprint else campaign_fingerprint(cfg, rt, out, hf_cache, progress)
+    if experiment:
+        # Reproducing (or creating) a published experiment: refuse the wrong provider/hardware
+        # before spending hours measuring on it.
+        from gpubench import experiment as ex
+
+        exp, ref = ex.load_experiment(experiment, data_root_env())
+        checks = ex.check_environment(exp, (fp or {}).get("cloud", {}))
+        if ref and fp:
+            checks += ex.compare_fingerprints(ref, fp)
+        typer.echo(ex.format_checks(checks))
+        if not ex.verdict(checks):
+            progress.finish(["host does not match " + experiment])
+            typer.echo(f"FAIL: this host doesn't have the exact hardware used in {experiment}. "
+                       "Try again later on another machine, or choose another experiment.",
+                       err=True)
+            raise typer.Exit(3)
     failed = []
     for session in cfg.sessions():
         try:
             result = run_session(session, out, hf_cache, bucket, runtime=rt, resume=resume,
-                                 progress=progress)
+                                 progress=progress, experiment=experiment, fingerprint=fp)
         except Exception:
             logging.exception("FAILED session %s; continuing", session.session_id)
             failed.append(session.session_id)
@@ -251,6 +310,170 @@ def run(
         typer.echo(f"failed sessions: {', '.join(failed)}", err=True)
         raise typer.Exit(1)
     typer.echo("campaign complete. Next: uv run gpubench submit " + str(out) + "/*/")
+
+
+def data_root_env() -> Path | None:
+    root = os.environ.get("SILYBENCH_DATA_DIR")
+    return Path(root) if root else None
+
+
+def campaign_fingerprint(cfg: BenchConfig, runtime: str, out: Path, hf_cache: Path,
+                         progress) -> dict:
+    """Fingerprint this machine once per campaign (GPU idle, before vLLM starts); reused on
+    --resume so every run of the campaign carries the same fingerprint."""
+    from gpubench.fingerprint import collect, hf_shard_url, summary
+    from gpubench.server import make_server
+
+    path = out / "fingerprint.json"
+    if path.exists():
+        return json.loads(path.read_text())
+    progress.update(stage="fingerprint", detail="GPU microbenchmark")
+    session = cfg.sessions()[0]
+    server = make_server(runtime, session, out / "fingerprint-vllm.log", hf_cache, out)
+    fp = collect(server.python_cmd(), hf_shard_url(session.served_model), echo=typer.echo)
+    path.write_text(json.dumps(fp, indent=2))
+    typer.echo(f"fingerprint: {summary(fp)}")
+    return fp
+
+
+@app.command()
+def fingerprint(
+    out: Path = typer.Option(None, help="Write the JSON here"),
+    runtime: str = typer.Option("auto"),
+    config: Path = typer.Option(Path("configs/smoke.yaml"), help="Its engine is used to run "
+                                "the microbenchmark"),
+) -> None:
+    """Fingerprint this machine: exact GPU identity + measured bandwidth/throughput."""
+    from gpubench.config import Hardware
+    from gpubench.fingerprint import collect, summary
+    from gpubench.paths import hf_cache
+    from gpubench.server import make_server, pick_runtime
+
+    cfg = load_config(config).with_hardware(Hardware(gpu_type="any"))
+    server = make_server(pick_runtime(runtime), cfg.sessions()[0], Path("/dev/null"),
+                         hf_cache(), Path("."))
+    fp = collect(server.python_cmd(), None, echo=typer.echo)
+    typer.echo(summary(fp))
+    if out:
+        out.write_text(json.dumps(fp, indent=2))
+        typer.echo(f"wrote {out}")
+
+
+@app.command("verify-host")
+def verify_host(
+    experiment: str = typer.Option(..., help="Experiment id, e.g. 2026-10-qwen3.8-27b-h100"),
+    data_root: Path = DATA_ROOT,
+    runtime: str = typer.Option("auto"),
+    fingerprint_file: Path = typer.Option(None, help="Use this fingerprint instead of "
+                                          "measuring (testing)"),
+) -> None:
+    """Is this machine the exact hardware the experiment ran on? Exit 1 if not."""
+    from gpubench import experiment as ex
+
+    exp, ref = ex.load_experiment(experiment, data_root)
+    if fingerprint_file:
+        cur = json.loads(fingerprint_file.read_text())
+    else:
+        from gpubench.fingerprint import collect
+        from gpubench.paths import hf_cache
+        from gpubench.server import make_server, pick_runtime
+
+        cfg = load_config(REPO_ROOT / exp.bench.config)
+        from gpubench.config import Hardware
+
+        cfg = cfg.with_hardware(Hardware(gpu_type="any"))
+        server = make_server(pick_runtime(runtime), cfg.sessions()[0], Path("/dev/null"),
+                             hf_cache(), Path("."))
+        cur = collect(server.python_cmd() if ref else None, None, echo=typer.echo)
+    checks = ex.check_environment(exp, cur.get("cloud", {}))
+    if ref:
+        checks += ex.compare_fingerprints(ref, cur)
+    else:
+        typer.echo("(this experiment has no reference fingerprint yet; checking the "
+                   "environment only)")
+    typer.echo(ex.format_checks(checks))
+    if ex.verdict(checks):
+        typer.echo(f"\nPASS: this host matches experiment {experiment}")
+        return
+    failed = [c.field for c in checks if c.status == "FAIL"]
+    typer.echo(f"\nFAIL: this host doesn't have the exact hardware used in {experiment} "
+               f"({', '.join(failed)}). Try again later on another machine, or choose an "
+               "experiment that was run on this GPU/provider.")
+    raise typer.Exit(1)
+
+
+experiment_app = typer.Typer(no_args_is_help=True, help="Published experiments.")
+app.add_typer(experiment_app, name="experiment")
+
+
+@experiment_app.command("list")
+def experiment_list(data_root: Path = DATA_ROOT) -> None:
+    """Published experiments (id, model, hardware, provider)."""
+    from gpubench import experiment as ex
+
+    for e in ex.list_experiments(data_root):
+        if e.get("status") != "published":
+            continue
+        envs = ", ".join(f"{v['provider']} {v.get('machine_type') or ''}".strip()
+                         for v in e["environments"])
+        typer.echo(f"{e['id']}: {e['title']} [{envs}]")
+
+
+@experiment_app.command("manifest")
+def experiment_manifest(config: Path) -> None:
+    """Print the models/scenarios blocks of experiment.yaml for a campaign config."""
+    import yaml
+
+    from gpubench.experiment import manifest_from_config
+
+    class NoAliases(yaml.SafeDumper):
+        def ignore_aliases(self, data):
+            return True
+
+    typer.echo(yaml.dump(manifest_from_config(load_config(config)), Dumper=NoAliases,
+                         sort_keys=False, default_flow_style=None, width=100))
+
+
+@experiment_app.command("show")
+def experiment_show(exp_id: str, data_root: Path = DATA_ROOT) -> None:
+    """Everything needed to reproduce an experiment exactly."""
+    from gpubench import experiment as ex
+    from gpubench.fingerprint import summary
+
+    exp, ref = ex.load_experiment(exp_id, data_root)
+    typer.echo(f"{exp.id}: {exp.title} ({exp.status})")
+    typer.echo(f"  code:    {exp.bench.repo} @ tag {exp.bench.tag}"
+               + (f" ({exp.bench.commit[:12]})" if exp.bench.commit else ""))
+    typer.echo(f"  config:  {exp.bench.config}")
+    for env in exp.environments:
+        typer.echo(f"  where:   {env.provider} {env.machine_type or ''} {env.zone or ''} "
+                   f"{env.provisioning or ''}, image {env.image}, runtime {env.runtime}")
+    if ref:
+        typer.echo(f"  hardware: {summary(ref)}")
+    if exp.runs:
+        hours = ex.recorded_hours(ex.load_runs(exp, data_root))
+        typer.echo(f"  runs:    {', '.join(exp.runs)} (~{sum(hours.values()):.1f} h measured)")
+
+
+@app.command()
+def compare(
+    run_dirs: list[Path],
+    experiment: str = typer.Option(...),
+    data_root: Path = DATA_ROOT,
+) -> None:
+    """Compare a reproduction with the published runs of an experiment."""
+    from gpubench import experiment as ex
+
+    exp, _ = ex.load_experiment(experiment, data_root)
+    refs = {(r.model.hf_id, r.model.precision): r for r in ex.load_runs(exp, data_root)}
+    for d in run_dirs:
+        rep = RunResult.model_validate_json((d / "result.json").read_text())
+        ref = refs.get((rep.model.hf_id, rep.model.precision))
+        if ref is None:
+            typer.echo(f"{rep.run_id}: no published run for this model/precision")
+            continue
+        typer.echo(f"== {rep.run_id} vs {ref.run_id}")
+        typer.echo(ex.format_checks(ex.compare_runs(ref, rep)))
 
 
 @app.command()
@@ -287,18 +510,103 @@ def submit(
     stage: Path = typer.Option(Path("submission"), help="Where --dry-run writes files"),
     allow_incomplete: bool = typer.Option(False, help="Submit runs that did not finish"),
 ) -> None:
-    """Validate finished runs and open a pull request adding them to the data repo."""
+    """Validate finished runs and open a pull request adding them to the data repo.
+    Runs of a published experiment get a comparison with its numbers in the PR."""
     from gpubench.submit import SubmitError, submit_runs
 
     dirs = [d for d in run_dirs if (d / "result.json").exists()]
     if not dirs:
         raise typer.BadParameter("no <run_dir>/result.json found in the given paths")
+    extra = ""
+    first = RunResult.model_validate_json((dirs[0] / "result.json").read_text())
+    if first.experiment:
+        from gpubench import experiment as ex
+
+        try:
+            exp, _ = ex.load_experiment(first.experiment, data_root_env())
+            refs = {(r.model.hf_id, r.model.precision): r for r in ex.load_runs(exp)}
+            parts = []
+            for d in dirs:
+                rep = RunResult.model_validate_json((d / "result.json").read_text())
+                ref = refs.get((rep.model.hf_id, rep.model.precision))
+                if ref:
+                    parts.append(f"**{rep.model.precision} vs published {ref.run_id}**\n```\n"
+                                 + ex.format_checks(ex.compare_runs(ref, rep)) + "\n```")
+            extra = "### Comparison with the published experiment\n" + "\n".join(parts)
+        except FileNotFoundError:
+            pass
     try:
-        url = submit_runs(dirs, data_repo, dry_run, stage, allow_incomplete, echo=typer.echo)
+        url = submit_runs(dirs, data_repo, dry_run, stage, allow_incomplete, echo=typer.echo,
+                          extra=extra)
     except SubmitError as e:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(1) from e
     typer.echo(url)
+
+
+@app.command("publish-raw")
+def publish_raw(
+    release: str = typer.Option(..., help="Release tag on the data repo, e.g. exp-<experiment>"),
+    experiment: str = typer.Option(..., help="Experiment id (assets.json goes in its folder)"),
+    title: str = typer.Option(None, help="Release title (default: the tag)"),
+    run_dir: list[Path] = typer.Option(None, help="Complete run directories (repeatable)"),
+    bundle: list[Path] = typer.Option(None, help="Code bundles that ran (sanitized first)"),
+    file: list[Path] = typer.Option(None, help="Other files: VM logs, prompt datasets, ..."),
+    data_root: Path = typer.Option(..., help="Local silybench-data checkout to update"),
+    data_repo: str = typer.Option(DEFAULT_DATA_REPO),
+    dry_run: bool = typer.Option(False, help="Build the files, don't upload"),
+    stage: Path = typer.Option(Path("publish-stage")),
+    redact: list[str] = typer.Option(None, help="Strings to redact in code bundles "
+                                     "(e.g. your GCP project id)"),
+) -> None:
+    """Maintainers: upload everything captured to a data-repo release and record it."""
+    from gpubench import publish
+
+    files, contents = [], {}
+    for d in run_dir or []:
+        f = publish.pack_run(d, stage)
+        files.append(f)
+        contents[f.name] = (f"complete run directory {d.name}: result.json, per-repeat "
+                            "vllm bench JSON, GPU telemetry, vLLM/lm-eval logs, accuracy "
+                            "results and per-question samples")
+    for b in bundle or []:
+        f, removed = publish.sanitize_bundle(b, stage, tuple(redact or ()))
+        files.append(f)
+        contents[f.name] = ("exact code bundle that ran on the VM (MANIFEST.sha256 lists every "
+                            f"file; {len(removed)} private terraform state/vars files removed)")
+    for x in file or []:
+        if publish.is_private(str(x)):
+            raise typer.BadParameter(f"refusing to publish private file {x}")
+        files.append(x)
+        contents[x.name] = ("VM log" if x.suffix == ".log" else
+                            "prompt dataset" if x.suffix == ".jsonl" else x.name)
+    total = sum(f.stat().st_size for f in files) / 1e6
+    typer.echo(f"{len(files)} files, {total:.0f} MB")
+    if dry_run:
+        for f in files:
+            typer.echo(f"  {f.name}: {contents[f.name]}")
+        return
+    publish.ensure_release(data_repo, release, title or release,
+                           f"Raw data for experiment `{experiment}`. See "
+                           f"experiments/{experiment}/ in this repo.")
+    assets = publish.upload(data_repo, release, files, contents, echo=typer.echo)
+    exp_dir = data_root / "experiments" / experiment
+    exp_dir.mkdir(parents=True, exist_ok=True)
+    existing = []
+    if (exp_dir / "assets.json").exists():
+        from gpubench.schema import RawAsset
+
+        existing = [RawAsset.model_validate(a)
+                    for a in json.loads((exp_dir / "assets.json").read_text())]
+    merged = {a.name: a for a in existing} | {a.name: a for a in assets}
+    publish.write_index(list(merged.values()), exp_dir / "assets.json")
+    for a in assets:
+        run_id = a.name.removesuffix(".tar.gz")
+        result = data_root / "runs" / run_id / "result.json"
+        if result.exists():
+            publish.attach_assets(result, [a])
+            typer.echo(f"recorded {a.name} in runs/{run_id}/result.json")
+    typer.echo(f"recorded {len(assets)} assets in {exp_dir / 'assets.json'}")
 
 
 @app.command("install-engine")

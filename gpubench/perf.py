@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from gpubench.config import SLO, PerfConfig, ServingSession, Workload
+from gpubench.prompts import stage_dataset
 from gpubench.schema import ITL, Percentiles, PerfPoint
 from gpubench.telemetry import GpuSampler, TelemetrySummary
 
@@ -32,7 +33,7 @@ def bench_serve_args(
     args = [
         "vllm", "bench", "serve",
         "--backend", "vllm",
-        "--model", session.model.hf_id,
+        "--model", session.served_model,
         "--base-url", f"http://localhost:{engine.port}",
         "--dataset-name", workload.dataset,
         "--num-prompts", str(num_prompts),
@@ -57,6 +58,15 @@ def bench_serve_args(
         ]
     elif workload.dataset == "sharegpt":
         args += ["--dataset-path", workload.dataset_path or f"{datasets_dir}/sharegpt.json"]
+    elif workload.dataset == "custom":
+        args += [
+            # Prompts are pre-rendered with the chat template and exactly input_len tokens long.
+            "--dataset-path", f"{datasets_dir}/{Path(workload.dataset_path).name}",
+            "--custom-output-len", str(workload.output_len),
+            "--skip-chat-template",
+            "--no-oversample",  # never resend a prompt (it would hit the prefix cache)
+            "--ignore-eos",
+        ]
     return args
 
 
@@ -122,6 +132,8 @@ def build_perf_point(
         tokens_per_s_per_user=1000.0 / itl.median if itl.median > 0 else 0.0,
         avg_power_w=avg_power,
         peak_memory_gb=telemetry.peak_memory_gb if telemetry else None,
+        max_gpu_temp_c=telemetry.max_temp_c if telemetry else None,
+        thermal_throttle_fraction=telemetry.thermal_throttle_fraction if telemetry else None,
         output_tokens_per_joule=tokens_per_joule,
         usd_per_1m_output_tokens=usd_per_1m,
         slo_pass=slo_pass(ttft.p99, itl.median, slo),
@@ -144,19 +156,21 @@ def make_point_runner(
     hw = session.hardware
 
     def measure(workload: Workload, concurrency: int) -> PerfPoint:
-        num_prompts = perf.num_prompts(concurrency)
+        if workload.dataset == "custom":
+            stage_dataset(workload, work_dir / "datasets")
+        num_prompts = perf.num_prompts(concurrency, workload)
         raws: list[dict] = []
         windows = []
         stem = f"{workload.name}_c{concurrency}"
         with GpuSampler(work_dir / "telemetry" / f"{stem}.csv") as sampler:
-            for rep in range(perf.repeats):
+            for rep in range(perf.repeats_for(workload)):
                 fname = f"{stem}_r{rep}.json"
                 exec_fn(
                     bench_serve_args(
                         session, workload, concurrency, num_prompts,
                         seed=perf.seed + rep, result_filename=fname,
                         # Warm up only before the first repeat.
-                        num_warmups=perf.num_warmups if rep == 0 else 0,
+                        num_warmups=perf.warmups_for(workload) if rep == 0 else 0,
                         raw_dir=raw_dir, datasets_dir=datasets_dir,
                     )
                 )
@@ -168,7 +182,7 @@ def make_point_runner(
         return build_perf_point(
             raws, workload, concurrency, num_prompts,
             gpu_count=hw.gpu_count * hw.node_count,
-            slo=perf.slo,
+            slo=perf.slo_for(workload),
             telemetry=sampler.summary(windows),
             price_per_hour_usd=hw.price_per_hour_usd,
         )

@@ -32,6 +32,13 @@ finish() {
   local code=$?
   echo "=== gpubench finished with exit code $code at $(date -u +%FT%TZ)"
   gcloud storage cp "$LOG" "gs://$BUCKET/logs/$NAME-$(date -u +%Y%m%dT%H%M%SZ).log" || true
+  STATE="gs://$BUCKET/campaign-state/${CAMPAIGN:-unknown}"
+  if [[ $code -eq 0 ]]; then
+    echo "done" | gcloud storage cp - "$STATE/DONE" || true
+  elif (( code < 129 || code > 143 )); then
+    # A real failure (not a preemption signal): tell watch.sh not to pay for a relaunch loop.
+    echo "exit $code" | gcloud storage cp - "$STATE/FAILED" || true
+  fi
   if [[ $SELF_DELETE == "true" ]]; then
     echo "deleting VM $NAME"
     gcloud compute instances delete "$NAME" --zone "$ZONE" --quiet
@@ -85,10 +92,17 @@ IMAGE=$(uv run python -c "from gpubench.config import load_config; print(load_co
 docker pull "$IMAGE"
 
 mkdir -p /opt/hf-cache /opt/gpubench-results
+# Resume after a Spot preemption: pull back every run directory mirrored so far (result.json,
+# raw bench JSON, telemetry, logs) plus the campaign's fingerprint; `--resume` then skips all
+# finished work. On a first launch there is nothing to pull.
+CAMPAIGN=$(uv run python -c "from gpubench.config import load_config; print(load_config('$WORK/$CONFIG').name)")
+gcloud storage rsync -r "gs://$BUCKET/runs" /opt/gpubench-results || true
+gcloud storage cp "gs://$BUCKET/campaign-state/$CAMPAIGN/fingerprint.json" /opt/gpubench-results/ 2>/dev/null || true
 # RUN_ARGS carries --provider gcp --price-per-hour ... (set by up.sh) plus any filters.
 # shellcheck disable=SC2086  # RUN_ARGS is intentionally word-split into flags
 uv run gpubench run "$WORK/$CONFIG" \
   --runtime docker \
+  --resume \
   --bucket "$BUCKET" \
   --out /opt/gpubench-results \
   --hf-cache /opt/hf-cache \

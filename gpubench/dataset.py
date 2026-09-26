@@ -350,6 +350,53 @@ def reproduce_md(runs: list[RunResult]) -> str:
     return "\n".join(lines)
 
 
+# --- experiments -----------------------------------------------------------------------------
+
+def load_experiments(root: Path) -> list[dict]:
+    """experiments/<id>/: experiment.yaml (+ fingerprint.json, assets.json, prices_at_run/)."""
+    import yaml
+
+    from gpubench.experiment import Experiment
+
+    out = []
+    base = root / "experiments"
+    for d in sorted(base.iterdir()) if base.exists() else []:
+        if not (d / "experiment.yaml").exists():
+            continue
+        exp = Experiment.model_validate(yaml.safe_load((d / "experiment.yaml").read_text()))
+        if exp.id != d.name:
+            raise ValueError(f"experiments/{d.name}: id {exp.id} != folder name")
+        entry = {
+            **exp.model_dump(),
+            "fingerprint": json.loads((d / "fingerprint.json").read_text())
+            if (d / "fingerprint.json").exists() else None,
+            "assets": json.loads((d / "assets.json").read_text())
+            if (d / "assets.json").exists() else [],
+            "datasets": yaml.safe_load((d / "datasets.yaml").read_text())
+            if (d / "datasets.yaml").exists() else [],
+            "has_prices_at_run": (d / "prices_at_run" / "gpu_hourly.yaml").exists(),
+        }
+        out.append(entry)
+    return out
+
+
+def check_experiments(root: Path) -> list[str]:
+    problems = []
+    run_ids = {p.name for p in (root / "runs").iterdir() if p.is_dir()}
+    for e in load_experiments(root):
+        for rid in e["runs"]:
+            if rid not in run_ids:
+                problems.append(f"experiments/{e['id']}: run {rid} not in runs/")
+                continue
+            r = RunResult.model_validate_json((root / "runs" / rid / "result.json").read_text())
+            if r.experiment != e["id"]:
+                problems.append(f"runs/{rid}: experiment is {r.experiment!r}, "
+                                f"listed by {e['id']}")
+        if e["status"] == "published" and not e["runs"]:
+            problems.append(f"experiments/{e['id']}: published without runs")
+    return problems
+
+
 # --- CLI -------------------------------------------------------------------------------------
 
 @dataset_app.command("check")
@@ -358,11 +405,23 @@ def check_cmd(runs: list[Path] = typer.Argument(None, help="Run folders (default
     """Validate submitted run folders (used on every data-repo PR)."""
     dirs = runs or sorted(p for p in (root / "runs").iterdir() if p.is_dir())
     problems = [p for d in dirs for p in check_run_dir(d)]
+    if not runs:
+        problems += check_experiments(root)
     for p in problems:
         typer.echo(f"✗ {p}")
     if problems:
         raise typer.Exit(1)
     typer.echo(f"✓ {len(dirs)} runs OK")
+
+
+@dataset_app.command("snapshot-prices")
+def snapshot_prices(experiment: str, root: Path = typer.Option(Path("."))) -> None:
+    """Freeze today's GPU and API price tables as the experiment's prices_at_run/."""
+    snap = root / "experiments" / experiment / "prices_at_run"
+    snap.mkdir(parents=True, exist_ok=True)
+    for name in ("gpu_hourly.yaml", "api.yaml"):
+        shutil.copyfile(root / "prices" / name, snap / name)
+    typer.echo(f"froze prices into {snap}")
 
 
 @dataset_app.command("build")
@@ -374,12 +433,40 @@ def build_cmd(root: Path = typer.Option(Path("."), help="Data repo root"),
         shutil.rmtree(out)
     out.mkdir(parents=True)
     runs = build_site_data(load_runs(root / "runs"), out)
+    experiments = load_experiments(root)
+    published = {e["id"] for e in experiments if e["status"] == "published"}
     cost = build_cost(
         runs,
         load_gpu_offers(root / "prices" / "gpu_hourly.yaml"),
         load_api_offers(root / "prices" / "api.yaml"),
+        headline=published,
     )
+    model_map = root / "prices" / "model_map.yaml"
+    if model_map.exists():
+        import yaml
+
+        # The website refreshes API prices live in the browser from these OpenRouter slugs.
+        cost["openrouter_slugs"] = yaml.safe_load(model_map.read_text()) or {}
     (out / "cost.json").write_text(json.dumps(cost, indent=2))
+    # Per experiment: its manifest/fingerprint/assets, and its cost at the prices of the day it
+    # ran (prices_at_run/, frozen) next to today's (cost.json, refreshed every 6 h).
+    exp_out = out / "experiments"
+    exp_out.mkdir()
+    for e in experiments:
+        d = exp_out / e["id"]
+        d.mkdir()
+        e["merged_runs"] = [r.run_id for r in runs if r.experiment == e["id"]]
+        (d / "experiment.json").write_text(json.dumps(e, indent=2, default=str))
+        snap = root / "experiments" / e["id"] / "prices_at_run"
+        if e["has_prices_at_run"]:
+            exp_runs = [r for r in runs if r.experiment == e["id"]]
+            at_run = build_cost(exp_runs, load_gpu_offers(snap / "gpu_hourly.yaml"),
+                                load_api_offers(snap / "api.yaml"))
+            (d / "cost_at_run.json").write_text(json.dumps(at_run, indent=2))
+    (out / "experiments.json").write_text(json.dumps(
+        [{k: e[k] for k in ("id", "title", "status", "description", "bench", "environments",
+                            "runs", "merged_runs", "release", "published_at",
+                            "has_prices_at_run")} for e in experiments], indent=2, default=str))
     write_tables(tables(runs, cost), out)
     (out / "schema.json").write_text(json.dumps(RunResult.model_json_schema(), indent=2))
     (out / "REPRODUCE.md").write_text(reproduce_md(runs))

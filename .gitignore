@@ -21,3 +21,6 @@ submission/
 .DS_Store
 .env*
 .gpubench-commit
+
+# Prompt datasets for custom workloads (downloaded + sha256-checked at run time)
+datasets/

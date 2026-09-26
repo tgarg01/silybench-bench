@@ -23,6 +23,7 @@ module "vm" {
   config_path     = var.config_path
   self_delete     = var.self_delete
   run_args        = var.run_args
+  image           = "projects/deeplearning-platform-release/global/images/${var.image}"
 }
 
 output "vm_name" { value = module.vm.name }

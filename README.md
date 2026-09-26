@@ -5,35 +5,31 @@ concurrent-user capacity, throughput, energy, accuracy and **$ per token**, serv
 vLLM. Results go to the public dataset [silybench-data](https://github.com/tgarg01/silybench-data),
 which powers the self-hosting vs API cost comparison on the silybench site.
 
-## Quick start: let Claude do it
+## Reproduce a published experiment: let Claude do it
 
-1. Rent a GPU box with SSH (RunPod, Vast.ai, Lambda, Hyperbolic, any cloud VM or your own machine).
-   Give it about 100 GB of disk.
-2. Install [Claude Code](https://claude.com/claude-code) on it, start `claude`, and paste:
+Each experiment on the silybench site lists exactly where and how it ran: provider, machine type,
+zone, pinned boot image, GPU fingerprint, and the git tag of this repo. To re-measure it yourself,
+start [Claude Code](https://claude.com/claude-code) and paste:
 
-> Clone https://github.com/tgarg01/silybench-bench and follow its AGENTS.md to benchmark this GPU. Ask me for the provider, hourly price and campaign, and show me the cost estimate before starting.
+> Clone https://github.com/tgarg01/silybench-bench and follow its AGENTS.md to reproduce experiment 2026-10-qwen3.8-27b-h100. Show me the cost before creating anything.
 
-Claude runs setup and pre-flight checks, estimates the time and cost for your OK, runs the
-campaign in the background (it survives disconnects and resumes after a crash), and opens a
-pull request with the results. Then it reminds you to shut the box down.
+Claude:
+1. checks out the experiment's exact code;
+2. refuses providers the experiment didn't use;
+3. provisions the same machine and image, and verifies that the GPU, driver, power limit and
+   measured memory/matmul speed match the reference fingerprint. If they don't, it stops and tells
+   you to try later or pick another GPU;
+4. shows the cost, based on the experiment's measured durations, and waits for your OK;
+5. runs with automatic resume across Spot preemptions;
+6. compares your numbers with the published ones and opens a "Reproduction of …" pull request.
 
-## Or by hand
+By hand: `uv run gpubench experiment show <id>`, then follow [AGENTS.md](AGENTS.md).
 
-```bash
-git clone https://github.com/tgarg01/silybench-bench && cd silybench-bench
-./setup.sh configs/qwen3-8b-quick.yaml                         # deps, runtime, doctor
-uv run gpubench plan configs/qwen3-8b-quick.yaml --price-per-hour 2.69
-uv run gpubench run  configs/qwen3-8b-quick.yaml --provider runpod --price-per-hour 2.69 --resume --detach
-uv run gpubench status                                         # re-run until FINISHED
-gh auth login && uv run gpubench submit results/*/             # PR to silybench-data
-```
-
-| Campaign | What | ~1x H100 |
-|---|---|---|
-| `configs/smoke.yaml` | Pipeline check (not publishable) | 15 min |
-| `configs/qwen3-8b-quick.yaml` | Qwen3-8B BF16+FP8, 3 workloads, 1 repeat, no accuracy | 1.5 h |
-| `configs/qwen3-8b.yaml` | Full Qwen3-8B: 5 workloads, 8 concurrency levels × 3 repeats, capacity search, 6 accuracy tasks | 12-16 h |
-| `configs/qwen3-14b.yaml` | Full Qwen3-14B | 20+ h |
+| Campaign | What |
+|---|---|
+| `configs/qwen3.8-27b-h100.yaml` | **Published experiment** `2026-10-qwen3.8-27b-h100`: Qwen3.8-27B BF16 + official FP8 checkpoint, 6 scenarios including 100k-token tool-calling contexts |
+| `configs/smoke.yaml` | Pipeline check (not publishable) |
+| `configs/qwen3-8b*.yaml`, `qwen3-14b.yaml` | Pipeline-validation campaigns (Qwen3-8B runs are kept as pipeline data) |
 
 ## How it works
 
@@ -44,7 +40,9 @@ gh auth login && uv run gpubench submit results/*/             # PR to silybench
 | Load | `vllm bench serve` with random prompts of fixed input/output length (`--ignore-eos`) at each concurrency level, 3 repeats, median taken. |
 | Capacity | Bisection for the most concurrent users with **p99 TTFT ≤ 2 s** and **median inter-token latency ≤ 50 ms**. The KV-cache limit is reported too. |
 | Accuracy | lm-evaluation-harness against the same server: MMLU-Pro, GPQA-Diamond, GSM8K, MATH-500, IFEval, ARC-Challenge. |
-| Robustness | `result.json` is saved after every point. `--resume` skips finished work. `--detach` survives SSH drops. vLLM listens on localhost only. |
+| Hardware fingerprint | `nvidia-smi -q` identity (PCI device id tells H100 SXM from PCIe/NVL, power limit, VBIOS, ECC/MIG), driver/CUDA, CPU/RAM, cloud machine type/zone/image, measured HBM bandwidth, BF16/FP8 matmul TFLOPS, PCIe and download speed, temperatures. `gpubench verify-host` compares a machine with an experiment's reference. |
+| Robustness | The run directory is saved (and mirrored to GCS on GCP) after every point. `--resume` skips finished work. `watch.sh` relaunches Spot VMs. `--detach` survives SSH drops. vLLM listens on localhost only. |
+| Scenarios | Random prompts of exact lengths, plus `custom` JSONL datasets checked by sha256. The 100k tool-calling prompts are built from real SWE-agent sessions (`gpubench prompts make-toolcall`). Per-scenario SLO, concurrency and repeats. |
 | Provenance | Each result records the git commit (dirty checkouts are rejected), the vLLM version and image digest, the driver and CUDA versions, the model revision SHA, and every serving flag. |
 
 `gpubench --help` lists every command. `result.json` follows `gpubench/schema.py` (published as JSON

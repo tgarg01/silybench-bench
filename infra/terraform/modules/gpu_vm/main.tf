@@ -62,6 +62,7 @@ resource "google_compute_instance" "vm" {
     gpubench-bucket      = var.bucket
     gpubench-self-delete = var.self_delete ? "true" : "false"
     gpubench-run-args    = var.run_args
+    gpubench-image       = var.image
     enable-oslogin       = "TRUE"
   }
 }

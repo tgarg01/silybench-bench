@@ -129,6 +129,11 @@ class VllmServer:
     def image_digest(self) -> str | None:
         return None
 
+    def python_cmd(self) -> list[str]:
+        """A python with the serving stack's torch/CUDA, for the fingerprint microbenchmark
+        (run while the server is down)."""
+        raise NotImplementedError
+
     def stop(self) -> None:
         raise NotImplementedError
 
@@ -176,7 +181,7 @@ class DockerServer(VllmServer):
             "-v", f"{self.work_dir.resolve()}:/work",
             "-e", "HF_TOKEN",
             engine.image,
-            self.session.model.hf_id,
+            self.session.served_model,
             *self.session.vllm_args(),
             *LOCAL_ONLY,
         ]
@@ -207,6 +212,10 @@ class DockerServer(VllmServer):
             capture_output=True, text=True,
         )
         return out.stdout.strip() or None
+
+    def python_cmd(self) -> list[str]:
+        return ["docker", "run", "--rm", "--gpus", "all", "--ipc", "host",
+                "--entrypoint", "python3", self.session.config.engine.image]
 
     def image_digest(self) -> str | None:
         out = subprocess.run(
@@ -248,7 +257,7 @@ class NativeServer(VllmServer):
     def serve_cmd(self) -> list[str]:
         return [
             str(self.venv / "bin" / "vllm"), "serve",
-            self.session.model.hf_id, *self.session.vllm_args(), *LOCAL_ONLY,
+            self.session.served_model, *self.session.vllm_args(), *LOCAL_ONLY,
         ]
 
     def start(self) -> None:
@@ -272,6 +281,10 @@ class NativeServer(VllmServer):
         if args and args[0] in ("vllm", "python3", "python"):
             args = [str(self.venv / "bin" / args[0]), *args[1:]]
         return subprocess.run(args, env=self._env(), **kwargs)
+
+    def python_cmd(self) -> list[str]:
+        ensure_native_vllm(self.session.config.engine.version)
+        return [str(self.venv / "bin" / "python")]
 
     def version(self) -> str | None:
         out = self.exec(

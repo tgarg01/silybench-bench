@@ -1,117 +1,136 @@
-# Runbook for AI agents: benchmark this GPU box and submit the results
+# Runbook for AI agents: reproduce a silybench experiment exactly
 
-You are on a rented GPU machine (RunPod, Vast.ai, Lambda, Hyperbolic, bare metal, a cloud VM, ...).
-A person asked you to run a silybench benchmark. The results go into the public dataset
-behind the silybench site, a self-hosting vs API cost comparison, so follow these steps exactly
-and don't improvise with the numbers.
+A person asked you to reproduce a published silybench experiment: the same model, code, provider,
+machine, hardware and measuring method, so they can check the numbers on the website themselves.
+**Their confidence is the product**, so follow these steps exactly, don't improvise, and never
+"make it work" on hardware or a provider the experiment didn't use.
 
 **Ground rules**
-- The person pays for this machine by the hour. Say what each long step costs before you start it,
-  and **never start a campaign without their explicit OK** on the estimate (step 3).
-- Don't edit `gpubench/` or `configs/`. Runs from modified code are rejected (`git_commit` ends in
-  `-dirty`). If something is broken, report it and stop; don't patch around it.
-- Never paste tokens (HF_TOKEN, GitHub) into files, commits or chat. Ask the person to `export` them
-  or run `gh auth login` themselves.
-- All commands run from the repo root: `cd silybench-bench`.
+- The person pays for the GPU by the hour. Show time and cost before anything is created, and
+  **never provision a GPU or start a run without their explicit OK**.
+- Don't edit `gpubench/`, `configs/` or `infra/`. Runs from modified code are rejected (`-dirty`
+  commit). If something breaks, report it and stop.
+- Never write tokens or credentials into files, commits or chat. The person runs `gcloud auth login`,
+  `gh auth login` or `export HF_TOKEN=...` themselves.
+- Run commands from the repo root, and prefix gpubench with `uv run` (after `uv sync`).
 
-## 1. Setup (5-10 min)
+## 1. Pick the experiment
 ```bash
-./setup.sh configs/<campaign>.yaml      # or just ./setup.sh if the campaign isn't chosen yet
+uv sync
+uv run gpubench experiment list                 # published experiments
+uv run gpubench experiment show <experiment-id> # exact code, provider, machine, image, hardware, measured hours
 ```
-It installs uv, Python deps, lm-eval, gh and tmux. It picks the vLLM runtime: Docker with the NVIDIA
-runtime if the box has it, otherwise **native**, a pip-installed vLLM of the same version (RunPod
-and Vast pods are containers with no Docker). It puts model weights on the largest disk and ends by
-running `gpubench doctor`.
+Tell the person what `show` says, in plain words. For example: "Qwen3.8-27B on 1× H100 SXM 80GB,
+GCP a3-highgpu-1g Spot in us-central1-a, image common-cu129-ubuntu-2404-nvidia-580-v20260909,
+silybench-bench tag exp-2026-10-qwen3.8-27b-h100, about 23 GPU-hours."
 
-## 2. Doctor: fix every ✗
+## 2. Provider gate (hard stop)
+The experiment lists the provider(s) it was run on (`where:` in `show`). If the person wants a
+different provider, or is on a machine at a different provider, **stop** and say:
+
+> This experiment was only run on <provider>. Reproducing it on <their provider> isn't supported:
+> different hosts, drivers and networking change the numbers. Please use <provider>, or pick an
+> experiment that was run on <their provider>.
+
+Don't offer workarounds. (To benchmark a *new* provider or GPU, see section B. It isn't a
+reproduction and is labelled differently on the site.)
+
+## 3. Exact code
 ```bash
-uv run gpubench doctor --config configs/<campaign>.yaml
+git fetch --tags
+git checkout <tag from show>
+git rev-parse HEAD      # must equal the commit printed by `show`
+uv sync --extra eval
 ```
-| ✗ / ! | What to do |
-|---|---|
-| no NVIDIA GPU visible | Wrong machine/template. Stop and tell the person. |
-| disk: … need ~N GB | Ask the person to enlarge the volume, or `export SILYBENCH_CACHE=/path/on/big/disk` and re-run doctor. |
-| lm-eval missing | `uv sync --extra eval` |
-| HF_TOKEN not set (GPQA) | Optional. The GPQA task is skipped without it. Ask the person to accept the dataset terms at huggingface.co/datasets/Idavidrein/gpqa and `export HF_TOKEN=...`. |
-| gh not logged in | Needed only in step 5. Ask the person to run `gh auth login` (device code flow works over SSH). |
-| open-files hard limit < 65535 | Warning only. Capacity above ~limit/2 users can't be probed, so results become lower bounds. |
 
-## 3. Choose the campaign, estimate the cost, and get approval
-Ask the person for:
-1. **Provider**: `runpod`, `vast`, `lambda`, `hyperbolic`, `gcp`, `aws`, `azure`, `coreweave`, `nebius`, `together`, … (lowercase).
-2. **Hourly price in USD for this whole machine**, from their provider dashboard. It is recorded with
-   the results, and the site reprices every benchmark with each provider's current list price anyway.
-3. **Pricing type**: `on-demand` (default), `spot`, `reserved`.
-4. **Campaign**:
+## 4. Provision and run: GCP experiments
+GCP experiments are driven from **the person's own computer** (you run there, not on the VM).
+Terraform creates the same VM type, zone and pinned boot image in the person's GCP project, and
+the VM runs the campaign by itself.
 
-| config | what | ~time on 1x H100 |
+1. **Prerequisites.** Check each; ask the person to fix anything missing:
+   - `gcloud` and `terraform` are installed. `gcloud auth login` and
+     `gcloud auth application-default login` are done. A project is selected with billing enabled.
+   - The zone's region has Spot H100 quota ≥ 1: `gcloud compute regions describe us-central1 --format=json`, then look at `PREEMPTIBLE_NVIDIA_H100_GPUS` (limit minus usage). If it is 0, the person must request quota in the console; stop until then.
+   - One-time base resources (bucket, service account, budget):
+     `cp infra/terraform/base/terraform.tfvars.example infra/terraform/base/terraform.tfvars`.
+     Fill it in with the person, then
+     `terraform -chdir=infra/terraform/base init && terraform -chdir=infra/terraform/base apply`
+     (show the plan and get an OK).
+   - `cp infra/terraform/envs/h100-1g/terraform.tfvars.example infra/terraform/envs/h100-1g/terraform.tfvars`,
+     then set `project_id`, `bucket` and `price_per_hour` (their Spot price for the machine).
+2. **Cost estimate from the real measured durations:**
+   ```bash
+   uv run gpubench plan --experiment <id> --price-per-hour <their price>
+   ```
+   Say "about X hours, about $Y, plus restarts if Spot capacity is reclaimed. Start?" **Wait for yes.**
+3. **Launch with the watchdog.** It relaunches after Spot preemptions and resumes from the last
+   measured point:
+   ```bash
+   infra/scripts/watch.sh h100-1g <config from show> --experiment <id> --image <image from show>
+   ```
+   On boot the VM fingerprints its hardware and runs **verify-host** against the experiment's
+   reference before measuring anything. If the hardware differs (another GPU variant, power
+   limit, driver, memory bandwidth off by more than 5%, …), the run stops, the VM deletes itself
+   and watch.sh exits with FAIL. Then tell the person:
+
+   > This host doesn't have the exact hardware used in <id> (<failed fields>). Please try again
+   > later, when GCP may place the VM on another host, or choose a different GPU/experiment.
+4. **Monitor.** watch.sh prints progress every 5 min: stage, workload and points done. Relay it
+   occasionally; don't poll in a tight loop. The full log is at
+   `gcloud storage ls gs://<bucket>/logs/`.
+
+## 5. Compare and submit
+```bash
+gcloud storage rsync -r gs://<bucket>/runs results/     # mirrored run directories
+uv run gpubench compare results/<run_dirs>/ --experiment <id>
+gh auth login            # the person does this
+uv run gpubench submit results/<run_dirs>/ --dry-run
+uv run gpubench submit results/<run_dirs>/
+```
+`compare` checks max users at the SLO, throughput, inter-token latency and p99 TTFT against the
+published runs (±10%). Explain every WARN honestly. The PR is titled "Reproduction of <id>" and
+includes the comparison.
+
+## 6. Tear down
+```bash
+infra/scripts/down.sh h100-1g        # safe if the VM already deleted itself
+gcloud compute instances list        # must show no gpubench VM
+```
+Tell the person that the results bucket costs cents per month, and that they can delete it.
+
+## Experiments on other providers (e.g. a RunPod pod)
+When an experiment's `where:` is a pod or VM you connect to by SSH, you run **on that machine**:
+1. The person rents exactly the listed machine type (same provider, same GPU type), installs
+   Claude Code, and asks you to follow this file.
+2. `./setup.sh`, then `uv run gpubench verify-host --experiment <id>`. On FAIL, give the exact
+   message from step 4.3 and tell the person to terminate the pod.
+3. `uv run gpubench plan --experiment <id> --price-per-hour <price>`, and wait for the OK.
+4. `uv run gpubench run <config> --provider <provider> --price-per-hour <price> --experiment <id> --resume --detach`,
+   then `uv run gpubench status` every 10-20 min, then steps 5-6 (results are in `results/`).
+
+## B. Benchmark new hardware (not a reproduction)
+To measure a GPU/provider that no experiment covers yet: `./setup.sh`,
+`uv run gpubench plan <config> --price-per-hour <price>` (and wait for OK), then
+`uv run gpubench run <config> --provider <p> --price-per-hour <price> --resume --detach`, then
+`gpubench submit`. The maintainers decide whether it becomes a new published experiment.
+
+## Troubleshooting
+| Symptom | Cause | Fix |
 |---|---|---|
-| `configs/smoke.yaml` | 15-minute pipeline check. **Not publishable.** Run it first on a new provider/GPU type. | 0.2 h |
-| `configs/qwen3-8b-quick.yaml` | Qwen3-8B BF16+FP8, 3 workloads, 1 repeat, no accuracy | 1.5 h |
-| `configs/qwen3-8b.yaml` | Full Qwen3-8B: 5 workloads × 8 concurrency levels × 3 repeats + capacity search + 6 accuracy tasks | 12-16 h |
-| `configs/qwen3-14b.yaml` | Full Qwen3-14B | ~20+ h |
+| watch.sh: `FAIL` / exit 3 in the VM log | verify-host: different hardware | Try later, or a different experiment (see 4.3) |
+| watch.sh relaunches repeatedly | Spot capacity is being reclaimed | Normal; each relaunch resumes. If it's too slow, tell the person and suggest a quieter time |
+| `Quota 'PREEMPTIBLE_NVIDIA_H100_GPUS' exceeded` | no Spot H100 quota | The person requests quota in the GCP console |
+| `ZONE_RESOURCE_POOL_EXHAUSTED` | no Spot H100 free in the zone right now | Wait and retry. A different zone is only acceptable if verify-host still passes (it warns on zone) |
+| `sha256 … != expected` for a dataset | corrupted or partial download | Delete the file in `datasets/`; it re-downloads |
+| image not found | the pinned boot image was deprecated by Google | Stop: exact reproduction is no longer possible on GCP; tell the person |
+| `Too many open files` in a capacity probe | fd limit | Handled automatically (a lower-bound capacity is recorded) |
 
-Then show them the estimate:
-```bash
-uv run gpubench plan configs/<campaign>.yaml --price-per-hour <USD/h>
-```
-Tell them: "This will take about X hours and cost about $Y (±50%). Start?" **Wait for a yes.**
-If the full campaign is too expensive, offer `--precision fp8`, `--workload <name>` or `--skip-accuracy`
-(the same flags work for `plan` and `run`).
-
-## 4. Run it detached, then monitor
-```bash
-uv run gpubench run configs/<campaign>.yaml --provider <provider> --price-per-hour <USD/h> \
-  [--provisioning spot] --resume --detach
-```
-- `--detach` keeps the run going if SSH or your session drops. `--resume` makes re-running the same
-  command safe: finished sessions, workloads and accuracy tasks are skipped.
-- The first session downloads the model and, on the native runtime, installs vLLM, so expect
-  5-15 min before the first measurement.
-
-Check progress (cheap; do it every ~10-20 min, not in a tight loop):
-```bash
-uv run gpubench status
-```
-- `RUNNING`: fine. Report `stage`, `perf points N/~M` and elapsed vs estimate to the person.
-- `STOPPED`: the process died. Read `results/run.log` (tail), then re-run the **same** `run`
-  command. `--resume` continues where it stopped.
-- `FINISHED` with failed sessions: the log says why. Common fixes are below.
-- A workload or accuracy task failing is logged and skipped; the rest of the campaign continues.
-
-## 5. Submit the results as a pull request
-```bash
-uv run gpubench submit results/*/ --dry-run    # validate and show what would be submitted
-uv run gpubench submit results/*/              # opens a PR on github.com/tgarg01/silybench-data
-```
-- This needs `gh auth login` (the person's GitHub account). Without write access it forks the data
-  repo automatically.
-- Smoke runs and unfinished runs are refused on purpose. To submit a partly failed campaign, add
-  `--allow-incomplete` and tell the person what is missing.
-- Give the person the PR URL. The data repo's CI validates the run, and after merge the website
-  rebuilds with the new numbers.
-
-## 6. Stop paying
-Remind the person to **stop or terminate the pod/VM** now. Results live in the PR, so the box is
-disposable. (`results/` is local only; if the PR failed, copy it off first:
-`tar czf results.tgz results/` then scp/download it.)
-
-## Troubleshooting (known failures)
-| Symptom in `results/run.log` / `vllm.log` | Cause | Fix |
-|---|---|---|
-| `vLLM exited during startup`, `CUDA out of memory` | Another process holds GPU memory | `nvidia-smi` to find it; kill it; `--resume` |
-| `No space left on device` | Weights on a small root disk | `export SILYBENCH_CACHE=/big/disk/silybench-cache`, `--resume` |
-| `Too many open files` during a capacity probe | fd limit | Automatically caught: capacity is recorded as a lower bound. Nothing to do. |
-| pip install of vLLM fails (native) | Driver too old for the vLLM wheel's CUDA | Report the driver (`nvidia-smi`) and stop; the provider template needs a newer driver. |
-| `gated` / 401 on `Idavidrein/gpqa` | No HF_TOKEN, or terms not accepted | GPQA is skipped; the other tasks still count. |
-| Spot/preemptible box vanished | Preemption | New box: clone, `./setup.sh`, copy `results/` back if you saved it, same `run --resume` |
-| `vllm: command not found` in native mode | Engine install interrupted | `rm -rf <cache>/engines/vllm-*` then `uv run gpubench install-engine configs/<campaign>.yaml` |
-
-## What gets measured (for answering the person's questions)
-- **Latency**: p95/p99 time-to-first-token, time-per-output-token, end-to-end; median, p95 and p99
-  inter-token latency, per workload and concurrency.
-- **Capacity**: the most concurrent users served while p99 TTFT ≤ 2 s and median inter-token
-  latency ≤ 50 ms (≥ 20 tokens/s per user). This drives the cost numbers. Also: the KV-cache limit.
-- **Throughput, tokens/joule, $ per 1M tokens** at the price they gave.
-- **Accuracy** with lm-evaluation-harness (MMLU-Pro, GPQA-Diamond, GSM8K, MATH-500, IFEval, ARC-C),
-  so quantization (FP8) trade-offs are visible.
+## What gets measured
+- **Latency** per scenario and number of users: p95/p99 time to first token (TTFT), time per
+  output token (TPOT), end-to-end latency; median/p95/p99 inter-token latency.
+- **Capacity**: the most concurrent users with p99 TTFT ≤ the scenario's limit (2 s, or 30 s for
+  100k-token prompts) and median inter-token latency ≤ 50 ms. This drives the cost comparison.
+- **Throughput, power, tokens per joule, temperature and thermal throttling** per point.
+- **Hardware fingerprint**: GPU identity, measured HBM/matmul/PCIe speed, CPU/RAM, network, temperatures.
+- **Accuracy** (lm-evaluation-harness) when the experiment includes it.

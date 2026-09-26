@@ -30,3 +30,10 @@ variable "price_per_hour" {
   type    = number
   default = null
 }
+
+# Exact boot image (NVIDIA driver + CUDA). Pinned, not a family, so the driver can't change
+# between an experiment and its reproductions. Override with up.sh --image.
+variable "image" {
+  type    = string
+  default = "common-cu129-ubuntu-2404-nvidia-580-v20260909"
+}

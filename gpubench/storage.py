@@ -13,13 +13,22 @@ def upload_run(run_dir: Path, bucket: str) -> str:
     return dest
 
 
-def upload_result(run_dir: Path, bucket: str) -> None:
-    """Push just result.json (small, cheap) so partial progress survives a preemption."""
+def upload_result(run_dir: Path, bucket: str, campaign: str = "default") -> None:
+    """Mirror the whole run directory (incremental) after every measured point, so a Spot
+    preemption loses at most one point and no raw file: a relaunched VM pulls it back and
+    `--resume` continues. Campaign-level files (fingerprint, progress) go alongside."""
     subprocess.run(
-        ["gcloud", "storage", "cp", str(run_dir / "result.json"),
-         f"gs://{bucket}/runs/{run_dir.name}/result.json"],
+        ["gcloud", "storage", "rsync", "-r", str(run_dir),
+         f"gs://{bucket}/runs/{run_dir.name}"],
         check=False, capture_output=True,
     )
+    for name in ("fingerprint.json", "progress.json"):
+        f = run_dir.parent / name
+        if f.exists():
+            subprocess.run(
+                ["gcloud", "storage", "cp", str(f), f"gs://{bucket}/campaign-state/{campaign}/{name}"],
+                check=False, capture_output=True,
+            )
 
 
 def download_results(bucket: str, dest: Path) -> None:

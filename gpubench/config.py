@@ -76,9 +76,12 @@ class Engine(BaseModel):
 
 
 class ModelSpec(BaseModel):
-    hf_id: str
+    hf_id: str  # the base model; results, API prices and comparisons are keyed by it
     revision: str = "main"
     precisions: list[Precision] = ["bf16"]
+    # Pre-quantized checkpoints served instead of quantizing hf_id on load,
+    # e.g. {fp8: Qwen/Qwen3.8-27B-FP8} (how API providers typically serve FP8).
+    checkpoints: dict[Precision, str] = Field(default_factory=dict)
     max_model_len: int = 16384
     gpu_memory_utilization: float = 0.90
     # Extra vLLM flags, e.g. {"reasoning-parser": "qwen3"}. Values may be str/int/dict.
@@ -90,18 +93,44 @@ class ModelSpec(BaseModel):
     def slug(self) -> str:
         return self.hf_id.split("/")[-1].lower()
 
+    def checkpoint(self, precision: str) -> str:
+        """The HF repo actually served for this precision."""
+        return self.checkpoints.get(precision, self.hf_id)  # type: ignore[call-overload]
+
+
+class SLO(BaseModel):
+    """A concurrency level 'passes' when every limit holds. Drives max concurrent users."""
+
+    ttft_p99_ms: float = 2000.0
+    itl_median_ms: float = 50.0  # 50 ms => >= 20 tok/s per user
+
 
 class Workload(BaseModel):
     name: str
-    dataset: Literal["random", "sharegpt"] = "random"
+    # random: synthetic tokens of exactly input_len. custom: a JSONL of pre-rendered prompts
+    # ({"prompt": ...}, chat template already applied) of input_len tokens each.
+    dataset: Literal["random", "sharegpt", "custom"] = "random"
     input_len: int | None = None
     output_len: int | None = None
-    dataset_path: str | None = None  # for sharegpt
+    dataset_path: str | None = None  # sharegpt / custom: local path (relative to the repo)
+    dataset_url: str | None = None  # custom: downloaded to dataset_path if missing
+    sha256: str | None = None  # custom: the file must hash to this (byte-identical prompts)
+    # Per-workload overrides of the campaign defaults (e.g. a 100k-token scenario can't meet
+    # a 2 s first-token target and can't run 512 users).
+    slo: SLO | None = None
+    concurrency: list[int] | None = None
+    min_prompts: int | None = None
+    repeats: int | None = None
+    num_warmups: int | None = None
 
     @model_validator(mode="after")
     def _check(self) -> Workload:
-        if self.dataset == "random" and (self.input_len is None or self.output_len is None):
-            raise ValueError(f"workload {self.name}: random dataset needs input_len and output_len")
+        if self.dataset in ("random", "custom") and (
+            self.input_len is None or self.output_len is None
+        ):
+            raise ValueError(f"workload {self.name}: {self.dataset} needs input_len and output_len")
+        if self.dataset == "custom" and not (self.dataset_path and self.sha256):
+            raise ValueError(f"workload {self.name}: custom dataset needs dataset_path and sha256")
         return self
 
     @property
@@ -110,13 +139,6 @@ class Workload(BaseModel):
         if self.input_len is None or self.output_len is None:
             return None
         return self.input_len + self.output_len
-
-
-class SLO(BaseModel):
-    """A concurrency level 'passes' when every limit holds. Drives max concurrent users."""
-
-    ttft_p99_ms: float = 2000.0
-    itl_median_ms: float = 50.0  # 50 ms => >= 20 tok/s per user
 
 
 class CapacitySearch(BaseModel):
@@ -141,8 +163,33 @@ class PerfConfig(BaseModel):
     slo: SLO = SLO()
     capacity: CapacitySearch = CapacitySearch()
 
-    def num_prompts(self, concurrency: int) -> int:
-        return max(self.min_prompts, self.prompts_per_user * concurrency)
+    # Skip sweep levels above this multiple of the KV-cache limit: past it requests only
+    # queue, which takes hours and says nothing new. None = run every level.
+    max_kv_multiple: float | None = 2.0
+
+    def num_prompts(self, concurrency: int, workload: Workload | None = None) -> int:
+        floor = workload.min_prompts if workload and workload.min_prompts else self.min_prompts
+        return max(floor, self.prompts_per_user * concurrency)
+
+    def slo_for(self, workload: Workload) -> SLO:
+        return workload.slo or self.slo
+
+    def concurrency_for(self, workload: Workload) -> list[int]:
+        return workload.concurrency or self.concurrency
+
+    def repeats_for(self, workload: Workload) -> int:
+        return workload.repeats or self.repeats
+
+    def warmups_for(self, workload: Workload) -> int:
+        return self.num_warmups if workload.num_warmups is None else workload.num_warmups
+
+    def levels(self, workload: Workload, kv_users: int | None) -> tuple[list[int], list[int]]:
+        """(levels to measure, levels skipped) given how many requests fit in the KV cache."""
+        levels = sorted(self.concurrency_for(workload))
+        if not kv_users or self.max_kv_multiple is None:
+            return levels, []
+        limit = max(levels[0], int(self.max_kv_multiple * kv_users))
+        return [c for c in levels if c <= limit], [c for c in levels if c > limit]
 
 
 class AccuracyTask(BaseModel):
@@ -200,6 +247,15 @@ class ServingSession(BaseModel):
         gpu = f"{hw.gpu_type.lower()}x{hw.gpu_count}" if hw else "gpu"
         return f"{gpu}_{self.model.slug}_{self.precision}"
 
+    @property
+    def served_model(self) -> str:
+        """HF repo passed to `vllm serve` (a pre-quantized checkpoint, or the base model)."""
+        return self.model.checkpoint(self.precision)
+
+    @property
+    def prequantized(self) -> bool:
+        return self.served_model != self.model.hf_id
+
     def vllm_args(self) -> list[str]:
         """Full `vllm serve` argument list (after the model id)."""
         m = self.model
@@ -210,7 +266,9 @@ class ServingSession(BaseModel):
             "--port", str(self.config.engine.port),
             "--seed", str(self.config.perf.seed),
         ]
-        if self.precision == "fp8":
+        if self.prequantized:
+            pass  # vLLM reads the quantization scheme from the checkpoint's config
+        elif self.precision == "fp8":
             args += ["--quantization", "fp8"]
         else:
             args += ["--dtype", {"bf16": "bfloat16", "fp16": "float16"}[self.precision]]

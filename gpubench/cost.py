@@ -115,6 +115,7 @@ def deployments(runs: list[RunResult], gpu_offers: list[GpuOffer]) -> list[dict]
             offers.sort(key=lambda o: o["usd_per_hour"])
             rows.append({
                 "run_id": run.run_id,
+                "experiment": run.experiment,
                 "model": run.model.hf_id,
                 "precision": run.model.precision,
                 "gpu_type": hw.gpu_type,
@@ -211,9 +212,12 @@ def comparisons(deployment_rows: list[dict], api_price_rows: list[dict]) -> list
 
 
 def build_cost(runs: list[RunResult], gpu_offers: list[GpuOffer],
-               api_offers: list[ApiOffer]) -> dict:
+               api_offers: list[ApiOffer], headline: set[str] | None = None) -> dict:
+    """`headline`: experiment ids whose runs feed the comparisons (published experiments);
+    None = every run. Deployments always cover every run (tagged with their experiment)."""
     deps = deployments(runs, gpu_offers)
     apis = api_rows(api_offers, deps)
+    comp_deps = deps if headline is None else [d for d in deps if d["experiment"] in headline]
     return {
         "assumptions": {
             "hours_per_month": HOURS_PER_MONTH,
@@ -226,5 +230,5 @@ def build_cost(runs: list[RunResult], gpu_offers: list[GpuOffer],
         "api_offers": [o.model_dump(mode="json") for o in api_offers],
         "deployments": deps,
         "api": apis,
-        "comparisons": comparisons(deps, apis),
+        "comparisons": comparisons(comp_deps, apis),
     }
