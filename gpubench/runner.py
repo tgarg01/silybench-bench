@@ -68,6 +68,18 @@ def find_previous(out_root: Path, session: ServingSession) -> tuple[Path, RunRes
     return None
 
 
+def missing_work(session: ServingSession, result: RunResult) -> list[str]:
+    """Workloads/quality suites the config asks for that the run doesn't have (e.g. they
+    failed); a resumed campaign retries them."""
+    perf = session.config.perf
+    have = {c.workload for c in result.capacity}
+    have_q = {q.workload for q in result.quality}
+    missing = [w.name for w in perf.workloads if perf.enabled and w.name not in have]
+    missing += [f"{w.name} quality" for w in perf.workloads
+                if w.quality is not None and w.name not in have_q]
+    return missing
+
+
 def prepare_resume(result: RunResult) -> RunResult:
     """Keep finished workloads (those with a capacity entry) and accuracy tasks; drop the
     perf points of a workload that was cut off mid-way so it is re-measured from scratch."""
@@ -95,6 +107,10 @@ def run_session(
     progress = progress or Progress(out_root / "progress.json")
 
     previous = find_previous(out_root, session) if resume else None
+    if previous and previous[1].complete and missing_work(session, previous[1]):
+        log.info("previous run %s is missing %s; resuming it", previous[1].run_id,
+                 ", ".join(missing_work(session, previous[1])))
+        previous = (previous[0], previous[1].model_copy(update={"complete": False}))
     if previous and previous[1].complete:
         log.info("=== session %s already complete in %s; skipping", session.session_id,
                  previous[0])
@@ -157,6 +173,8 @@ def run_session(
         save()  # mirror vllm.log (the reason) before giving up on this session
         raise
     with server:
+        if any(w.dataset == "custom" for w in cfg.perf.workloads) and cfg.perf.enabled:
+            result.software.bench_extras = server.ensure_bench_extras()
         result.software.engine_version = server.version()
         result.software.engine_image_digest = server.image_digest()
         result.kv_cache_tokens = server.kv_cache_tokens()

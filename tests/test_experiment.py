@@ -236,3 +236,21 @@ def test_per_precision_max_num_seqs_caps_the_sweep(cfg):
     assert run[-1] == 512 and skipped == []
     run, skipped = cfg.perf.levels(chat, min(976, 200))
     assert skipped == [512]
+
+
+def test_resume_retries_failed_workloads_of_a_finished_run(cfg):
+    """Smoke run finding: a workload that failed must be retried by --resume."""
+    from gpubench.quality import QualityResult
+    from gpubench.runner import missing_work
+    from gpubench.sample import sample_runs
+
+    s = cfg.sessions()[0]
+    run = sample_runs()[0].model_copy(update={"complete": True})
+    names = [w.name for w in cfg.perf.workloads]
+    have = [c.model_copy(update={"workload": n}) for c, n in zip(run.capacity * 2, names[1:],
+                                                                 strict=False)]
+    q = QualityResult(workload="toolcall-100k-512", dataset_sha256="x", responses="q")
+    partial = run.model_copy(update={"capacity": have, "quality": [q]})
+    assert missing_work(s, partial) == ["toolcall-100k-512"]
+    assert missing_work(s, partial.model_copy(update={"quality": []})) == [
+        "toolcall-100k-512", "toolcall-100k-512 quality"]

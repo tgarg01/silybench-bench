@@ -111,6 +111,8 @@ class SoftwareInfo(BaseModel):
     engine_image_digest: str | None = None
     # How vLLM ran: "docker" (engine_image) or "native" (pip vllm==engine_version in a venv).
     runtime: Literal["docker", "native", "mock"] | None = None
+    # Packages added to the load generator (not the server), e.g. pandas for custom datasets.
+    bench_extras: list[str] = []
     lm_eval_version: str | None = None
     gpubench_version: str
     nvidia_driver: str | None = None

@@ -28,6 +28,10 @@ CONTAINER_NAME = "gpubench-vllm"
 KV_CACHE_RE = re.compile(r"KV cache size: ([\d,]+) tokens")
 # One socket per simulated user; the default 1024 fd limit broke a 1024-user probe.
 NOFILE = 65535
+# vllm/vllm-openai images lack the `vllm[bench]` extra pandas that `vllm bench serve` needs to
+# read custom JSONL datasets (random prompts don't). Installed into the load generator only,
+# pinned, and recorded in the result.
+BENCH_EXTRAS = ["pandas==2.2.3"]
 # Rented boxes often have public IPs: never expose the benchmark server beyond localhost.
 LOCAL_ONLY = ["--host", "127.0.0.1"]
 
@@ -129,6 +133,10 @@ class VllmServer:
     def image_digest(self) -> str | None:
         return None
 
+    def ensure_bench_extras(self) -> list[str]:
+        """Extra packages the load generator needs for custom datasets (none by default)."""
+        return []
+
     def python_cmd(self) -> list[str]:
         """A python with the serving stack's torch/CUDA, for the fingerprint microbenchmark
         (run while the server is down)."""
@@ -206,6 +214,12 @@ class DockerServer(VllmServer):
 
     def exec(self, args: list[str], **kwargs) -> subprocess.CompletedProcess:
         return subprocess.run(["docker", "exec", CONTAINER_NAME, *args], **kwargs)
+
+    def ensure_bench_extras(self) -> list[str]:
+        """pip-install BENCH_EXTRAS into the running container (load generator deps)."""
+        self.exec(["python3", "-m", "pip", "install", "--quiet", "--no-cache-dir",
+                   *BENCH_EXTRAS], check=True, capture_output=True)
+        return BENCH_EXTRAS
 
     def version(self) -> str | None:
         out = self.exec(
