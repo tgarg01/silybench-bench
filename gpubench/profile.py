@@ -213,6 +213,8 @@ def profile_point(session: ServingSession, workload: Workload, concurrency: int,
     short = workload.model_copy(update={"output_len": output_len})
     server.start()
     try:
+        if workload.dataset == "custom":
+            server.ensure_bench_extras()  # pandas for the custom JSONL dataset (see server.py)
         args = bench_serve_args(session, short, concurrency, concurrency, 42,
                                 f"{name}.bench.json", num_warmups=1,
                                 raw_dir="/work/profile", datasets_dir="/work/datasets")
