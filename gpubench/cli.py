@@ -341,6 +341,7 @@ def run(
     skip_quality: bool = typer.Option(False, help="Skip the quality suites"),
     quality_only: bool = typer.Option(False, help="Only the quality suites (no perf points)"),
     variant: list[str] = typer.Option(None, help="Only these serving variants (repeatable)"),
+    profile_only: bool = typer.Option(False, help="Only the config's nsys profiles (no perf)"),
 ) -> None:
     """Run a campaign on this machine (needs NVIDIA GPUs; Docker optional)."""
     from gpubench.plan import estimate
@@ -402,6 +403,13 @@ def run(
             raise typer.Exit(3)
     failed = []
     finished: dict[str, RunResult] = {}
+    if profile_only:
+        for spec in cfg.profiles:
+            profile_standalone(cfg, spec, out, hf_cache, bucket, progress, failed)
+        progress.finish(failed)
+        if failed:
+            raise typer.Exit(1)
+        return
     for session in cfg.sessions():
         try:
             result = run_session(session, out, hf_cache, bucket, runtime=rt, resume=resume,
@@ -452,6 +460,33 @@ def run_profile(cfg: BenchConfig, spec, finished: dict, out: Path, hf_cache: Pat
         failed.append(f"profile {session.session_id}")
         return
     (work_dir / "result.json").write_text(result.model_dump_json(indent=2))
+    if bucket:
+        upload_result(work_dir, bucket, cfg.name)
+
+
+def profile_standalone(cfg: BenchConfig, spec, out: Path, hf_cache: Path, bucket: str | None,
+                       progress, failed: list[str]) -> None:
+    """--profile-only: capture into its own directory <UTC>_<session>_nsys/ (no perf run)."""
+    from datetime import UTC, datetime
+
+    from gpubench.profile import profile_point
+    from gpubench.storage import upload_result
+
+    session = next((s for s in cfg.sessions()
+                    if s.precision == spec.precision and s.variant == spec.variant), None)
+    workload = next((w for w in cfg.perf.workloads if w.name == spec.workload), None)
+    if session is None or workload is None:
+        return
+    work_dir = out / f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}_{session.session_id}_nsys"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    progress.update(stage="profile", detail=f"{session.session_id} {spec.workload}")
+    try:
+        prof = profile_point(session, workload, spec.concurrency, work_dir, hf_cache,
+                             spec.output_len, echo=typer.echo)
+        (work_dir / "profile.json").write_text(prof.model_dump_json(indent=2))
+    except Exception:
+        logging.exception("FAILED nsys profile of %s", session.session_id)
+        failed.append(f"profile {session.session_id}")
     if bucket:
         upload_result(work_dir, bucket, cfg.name)
 
