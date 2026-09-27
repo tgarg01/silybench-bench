@@ -98,6 +98,7 @@ class AccuracyResult(BaseModel):
 class ModelInfo(BaseModel):
     hf_id: str  # base model
     checkpoint: str | None = None  # repo actually served when it differs (e.g. an FP8 checkpoint)
+    variant: str | None = None  # named serving configuration (config ModelSpec.variants)
     revision: str  # resolved commit sha of the served repo when available
     precision: Precision
     max_model_len: int

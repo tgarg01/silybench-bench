@@ -138,13 +138,24 @@ def filter_config(
     skip_perf: bool = False,
     skip_workloads: list[str] | None = None,
     quality_only: bool = False,
+    variants: list[str] | None = None,
 ) -> BenchConfig:
     """Narrow a campaign (e.g. re-run only FP8). The config hash then reflects what actually ran."""
     cfg = cfg.model_copy(deep=True)
     if precisions:
         for m in cfg.models:
             m.precisions = [p for p in m.precisions if p in precisions]
-        cfg.models = [m for m in cfg.models if m.precisions]
+            m.variants = {k: v for k, v in m.variants.items() if v.precision in precisions}
+        cfg.models = [m for m in cfg.models if m.precisions or m.variants]
+    if variants:
+        known = {n for m in cfg.models for n in m.variants}
+        unknown = set(variants) - known
+        if unknown:
+            raise typer.BadParameter(f"unknown variants: {sorted(unknown)} (have {sorted(known)})")
+        for m in cfg.models:
+            m.precisions = []
+            m.variants = {k: v for k, v in m.variants.items() if k in variants}
+        cfg.models = [m for m in cfg.models if m.variants]
     if workloads:
         unknown = set(workloads) - {w.name for w in cfg.perf.workloads}
         if unknown:
@@ -180,10 +191,11 @@ def validate(
     skip_workload: list[str] = typer.Option(None),
     skip_quality: bool = typer.Option(False),
     quality_only: bool = typer.Option(False),
+    variant: list[str] = typer.Option(None),
 ) -> None:
     """Validate a config and print the sessions and perf points it expands to."""
     cfg = filter_config(load_config(config), precision, workload, skip_accuracy, skip_perf,
-                        skip_workload, quality_only)
+                        skip_workload, quality_only, variant)
     perf = cfg.perf
     typer.echo(f"campaign {cfg.name}")
     for w in perf.workloads:
@@ -328,6 +340,7 @@ def run(
     skip_workload: list[str] = typer.Option(None, help="Run every workload except these"),
     skip_quality: bool = typer.Option(False, help="Skip the quality suites"),
     quality_only: bool = typer.Option(False, help="Only the quality suites (no perf points)"),
+    variant: list[str] = typer.Option(None, help="Only these serving variants (repeatable)"),
 ) -> None:
     """Run a campaign on this machine (needs NVIDIA GPUs; Docker optional)."""
     from gpubench.plan import estimate
@@ -337,7 +350,7 @@ def run(
     from gpubench.storage import upload_run
 
     cfg = filter_config(load_config(config), precision, workload, skip_accuracy, skip_perf,
-                        skip_workload, quality_only)
+                        skip_workload, quality_only, variant)
     cfg = resolve_hardware(cfg, provider, price_per_hour, provisioning, gpu_type, gpu_count,
                            machine_type, zone)
     hw = cfg.hardware
@@ -388,6 +401,7 @@ def run(
                        err=True)
             raise typer.Exit(3)
     failed = []
+    finished: dict[str, RunResult] = {}
     for session in cfg.sessions():
         try:
             result = run_session(session, out, hf_cache, bucket, runtime=rt, resume=resume,
@@ -397,14 +411,49 @@ def run(
             logging.exception("FAILED session %s; continuing", session.session_id)
             failed.append(session.session_id)
             continue
+        finished[session.session_id] = result
         typer.echo(f"finished {out / result.run_id}")
         if bucket:
             typer.echo(f"uploaded {upload_run(out / result.run_id, bucket)}")
+    for spec in cfg.profiles:
+        run_profile(cfg, spec, finished, out, hf_cache, rt, bucket, progress, failed)
     progress.finish(failed)
     if failed:
         typer.echo(f"failed sessions: {', '.join(failed)}", err=True)
         raise typer.Exit(1)
     typer.echo("campaign complete. Next: uv run gpubench submit " + str(out) + "/*/")
+
+
+def run_profile(cfg: BenchConfig, spec, finished: dict, out: Path, hf_cache: Path,
+                runtime: str, bucket: str | None, progress, failed: list[str]) -> None:
+    """Nsight Systems capture for one ProfileSpec; stored in the matching run's result.json."""
+    from gpubench.profile import profile_point
+    from gpubench.storage import upload_result
+
+    session = next((s for s in cfg.sessions()
+                    if s.precision == spec.precision and s.variant == spec.variant), None)
+    workload = next((w for w in cfg.perf.workloads if w.name == spec.workload), None)
+    if session is None or workload is None or session.session_id not in finished:
+        return  # filtered out, or its session failed
+    result = finished[session.session_id]
+    if any(p.tool == "nsys" and p.workload == spec.workload
+           and p.concurrency == spec.concurrency for p in result.profiles):
+        return  # already captured (resume)
+    if runtime != "docker":
+        typer.echo("nsys profiling needs the docker runtime; skipping", err=True)
+        return
+    progress.update(stage="profile", detail=f"{session.session_id} {spec.workload}")
+    work_dir = out / result.run_id
+    try:
+        result.profiles.append(profile_point(session, workload, spec.concurrency, work_dir,
+                                             hf_cache, spec.output_len, echo=typer.echo))
+    except Exception:
+        logging.exception("FAILED nsys profile of %s; continuing", session.session_id)
+        failed.append(f"profile {session.session_id}")
+        return
+    (work_dir / "result.json").write_text(result.model_dump_json(indent=2))
+    if bucket:
+        upload_result(work_dir, bucket, cfg.name)
 
 
 def data_root_env() -> Path | None:
@@ -720,6 +769,29 @@ def publish_raw(
             publish.attach_assets(result, [a])
             typer.echo(f"recorded {a.name} in runs/{run_id}/result.json")
     typer.echo(f"recorded {len(assets)} assets in {exp_dir / 'assets.json'}")
+
+
+variants_app = typer.Typer(no_args_is_help=True, help="Compare serving variants.")
+app.add_typer(variants_app, name="variants")
+
+
+@variants_app.command("report")
+def variants_report(
+    run_dirs: list[Path],
+    baseline: str = typer.Option("base", help="Variant (or precision) to compare against"),
+    workload: str = typer.Option("toolcall-100k-512"),
+    price: list[str] = typer.Option(["gcp-spot=6.571"], help="label=USD/h (repeatable)"),
+    out: Path = typer.Option(None, help="Also write the markdown here"),
+) -> None:
+    """Capacity, latency, cost and quality of each variant vs the baseline (markdown)."""
+    from gpubench.variants import report
+
+    prices = {k: float(v) for k, v in (p.split("=", 1) for p in price)}
+    dirs = [d for d in run_dirs if (d / "result.json").exists()]
+    text = report(dirs, baseline, workload, prices)
+    typer.echo(text)
+    if out:
+        out.write_text(text)
 
 
 @app.command("install-engine")

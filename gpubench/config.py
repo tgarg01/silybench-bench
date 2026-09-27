@@ -75,6 +75,15 @@ class Engine(BaseModel):
         return tag.removeprefix("v")
 
 
+class Variant(BaseModel):
+    """A named serving configuration of one precision (e.g. an optimization being evaluated).
+    Its serving_args are applied last, over the model's and the precision's."""
+
+    precision: Precision
+    serving_args: dict[str, object] = Field(default_factory=dict)
+    description: str = ""
+
+
 class ModelSpec(BaseModel):
     hf_id: str  # the base model; results, API prices and comparisons are keyed by it
     revision: str = "main"
@@ -89,6 +98,9 @@ class ModelSpec(BaseModel):
     # Per-precision additions/overrides, e.g. {bf16: {max-num-seqs: 320}} when a limit
     # depends on how much memory the weights leave (hybrid models' Mamba state blocks).
     precision_serving_args: dict[Precision, dict[str, object]] = Field(default_factory=dict)
+    # Extra deployments of this model (optimizations). Sessions: one per precision, plus one
+    # per variant; ids end in _<precision> / _<precision>-<variant>.
+    variants: dict[str, Variant] = Field(default_factory=dict)
     # Recorded in results so thinking vs. non-thinking runs are never mixed up.
     thinking: bool = False
 
@@ -159,8 +171,11 @@ class Workload(BaseModel):
 
 class CapacitySearch(BaseModel):
     enabled: bool = True
-    # Stop bisecting when the pass/fail bracket is this narrow (in users).
+    # Stop bisecting when the pass/fail bracket is at most max(1, min(resolution,
+    # relative_resolution x passing level)) users wide: 4 users at large counts, but exact at
+    # small ones (a 100k-token scenario serves 2-6 users; 3 must not be skipped).
     resolution: int = 4
+    relative_resolution: float = 0.1
     max_iterations: int = 6
     # Upper bound for probing past the sweep when its top level still passes
     # (used when the KV-cache limit is unknown; otherwise 2x that limit).
@@ -222,6 +237,17 @@ class AccuracyConfig(BaseModel):
     max_gen_toks: int = 4096
 
 
+class ProfileSpec(BaseModel):
+    """An Nsight Systems capture of one load point (gpubench.profile), run after the benchmark
+    sessions on a separate server start, so it never touches the published timings."""
+
+    precision: Precision
+    variant: str | None = None
+    workload: str
+    concurrency: int = 1
+    output_len: int = 1  # 1 = the prefill alone
+
+
 class BenchConfig(BaseModel):
     name: str
     # Optional: normally filled at run time by `with_hardware` (detected GPUs + CLI flags).
@@ -231,9 +257,13 @@ class BenchConfig(BaseModel):
     models: list[ModelSpec]
     perf: PerfConfig
     accuracy: AccuracyConfig = AccuracyConfig()
+    profiles: list[ProfileSpec] = []
 
     def config_hash(self) -> str:
-        blob = json.dumps(self.model_dump(mode="json"), sort_keys=True).encode()
+        # Profiles don't change what is measured, so they don't change the hash (a campaign
+        # re-run with profiles added resumes the same runs).
+        blob = json.dumps(self.model_dump(mode="json", exclude={"profiles"}),
+                          sort_keys=True).encode()
         return hashlib.sha256(blob).hexdigest()[:12]
 
     def with_hardware(self, hardware: Hardware) -> BenchConfig:
@@ -244,6 +274,10 @@ class BenchConfig(BaseModel):
             ServingSession(config=self, model=m, precision=p)
             for m in self.models
             for p in m.precisions
+        ] + [
+            ServingSession(config=self, model=m, precision=v.precision, variant=name)
+            for m in self.models
+            for name, v in m.variants.items()
         ]
 
 
@@ -251,6 +285,15 @@ class ServingSession(BaseModel):
     config: BenchConfig
     model: ModelSpec
     precision: Precision
+    variant: str | None = None
+
+    def extra_args(self) -> dict[str, object]:
+        """Serving args in precedence order: model < precision < variant."""
+        m = self.model
+        out = {**m.serving_args, **m.precision_serving_args.get(self.precision, {})}
+        if self.variant:
+            out.update(m.variants[self.variant].serving_args)
+        return out
 
     @property
     def hardware(self) -> Hardware:
@@ -262,7 +305,8 @@ class ServingSession(BaseModel):
     def session_id(self) -> str:
         hw = self.config.hardware
         gpu = f"{hw.gpu_type.lower()}x{hw.gpu_count}" if hw else "gpu"
-        return f"{gpu}_{self.model.slug}_{self.precision}"
+        tag = f"{self.precision}-{self.variant}" if self.variant else self.precision
+        return f"{gpu}_{self.model.slug}_{tag}"
 
     @property
     def served_model(self) -> str:
@@ -272,9 +316,7 @@ class ServingSession(BaseModel):
     @property
     def max_num_seqs(self) -> int | None:
         """vLLM's cap on concurrently running requests, if set (more users only queue)."""
-        m = self.model
-        value = {**m.serving_args, **m.precision_serving_args.get(self.precision, {})}.get(
-            "max-num-seqs")
+        value = self.extra_args().get("max-num-seqs")
         return int(value) if value is not None else None
 
     @property
@@ -298,8 +340,7 @@ class ServingSession(BaseModel):
         else:
             args += ["--dtype", {"bf16": "bfloat16", "fp16": "float16"}[self.precision]]
         args += self.config.parallelism.vllm_args()
-        extra = {**m.serving_args, **m.precision_serving_args.get(self.precision, {})}
-        for key, value in extra.items():
+        for key, value in self.extra_args().items():
             flag = f"--{key}"
             if value is True:
                 args.append(flag)

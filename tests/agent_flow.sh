@@ -52,6 +52,14 @@ else
   echo "submit did not refuse a mock run" >&2; exit 1
 fi
 
+echo "== serving variants + report"
+VOUT=$(mktemp -d)
+$G run configs/ci/mock-variants.yaml --provider ci --gpu-type H100-80GB --price-per-hour 1 \
+  --runtime mock --no-fingerprint --out "$VOUT"
+REPORT=$($G variants report "$VOUT"/*/ --baseline base --workload toolcall-mini --price ci=1)
+echo "$REPORT" | head -8
+[[ $REPORT == *"| alt |"* && $REPORT == *"| base |"* && $REPORT == *"PASS"* ]]
+
 echo "== data repo build over these runs"
 DATA=$(mktemp -d)
 mkdir -p "$DATA/runs" "$DATA/prices"

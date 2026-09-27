@@ -273,6 +273,11 @@ def manifest_from_config(cfg) -> dict:
             {"hf_id": m.hf_id, "precision": p, "checkpoint": m.checkpoint(p),
              "max_model_len": m.max_model_len}
             for m in cfg.models for p in m.precisions
+        ] + [
+            {"hf_id": m.hf_id, "precision": v.precision, "variant": name,
+             "checkpoint": m.checkpoint(v.precision), "max_model_len": m.max_model_len,
+             "serving_args": v.serving_args}
+            for m in cfg.models for name, v in m.variants.items()
         ],
         "scenarios": [
             {"name": w.name, "input_len": w.input_len, "output_len": w.output_len,

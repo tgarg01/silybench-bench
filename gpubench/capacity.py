@@ -70,7 +70,7 @@ def find_max_users(
 
     hi = first_fail
     for _ in range(search.max_iterations):
-        if hi - lo <= search.resolution:
+        if hi - lo <= max(1, min(search.resolution, int(search.relative_resolution * lo))):
             break
         mid = (lo + hi) // 2
         if mid <= 0 or mid in points:

@@ -148,6 +148,7 @@ def run_session(
             model=ModelInfo(
                 hf_id=session.model.hf_id,
                 checkpoint=session.served_model if session.prequantized else None,
+                variant=session.variant,
                 revision=resolve_revision(session.served_model, session.model.revision),
                 precision=session.precision,
                 max_model_len=session.model.max_model_len,
