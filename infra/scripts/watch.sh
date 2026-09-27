@@ -42,6 +42,10 @@ run_phase() {
   "${up[@]}"
   while true; do
     sleep 300
+    if ! gcloud storage ls "$STATE/" >/dev/null 2>&1; then
+      log "cannot reach GCS (offline?); checking again in 5 min"
+      continue
+    fi
     if gcloud storage ls "$STATE/DONE" >/dev/null 2>&1; then
       log "phase finished: ${phase_args:-whole campaign}"
       return 0
@@ -74,7 +78,9 @@ run_phase() {
     launches=$((launches + 1))
     log "VM gone before the phase finished (Spot preemption?): relaunch $launches/$MAX"
     "$ROOT/infra/scripts/down.sh" "$ENV" >/dev/null 2>&1 || true
-    "${up[@]}" --relaunch
+    # A failed relaunch (e.g. this laptop briefly offline, no Spot capacity) is retried on the
+    # next check instead of ending the watch.
+    "${up[@]}" --relaunch || log "relaunch failed (network or capacity?); retrying in 5 min"
   done
 }
 
