@@ -112,6 +112,7 @@ def build_site_data(runs: list[RunResult], out: Path) -> list[RunResult]:
             "gpu_count": r.hardware.gpu_count * r.hardware.node_count,
             "model": r.model.hf_id,
             "precision": r.model.precision,
+            "variant": r.model.variant,
             "parallelism": r.parallelism.model_dump(),
             "engine_version": r.software.engine_version,
             "capacity": [c.model_dump(mode="json") for c in r.capacity],
@@ -185,7 +186,8 @@ def tables(runs: list[RunResult], cost: dict) -> dict[str, list[dict]]:
             "gpu_count": hw.gpu_count * hw.node_count, "machine_type": hw.machine_type,
             "provisioning": hw.provisioning, "price_per_hour_usd": hw.price_per_hour_usd,
             "model": r.model.hf_id, "model_revision": r.model.revision,
-            "precision": r.model.precision, "max_model_len": r.model.max_model_len,
+            "precision": r.model.precision, "variant": r.model.variant or "",
+            "max_model_len": r.model.max_model_len,
             "tp": r.parallelism.tp, "pp": r.parallelism.pp, "dp": r.parallelism.dp,
             "ep": r.parallelism.ep, "engine_version": sw.engine_version,
             "engine_image": sw.engine_image, "engine_image_digest": sw.engine_image_digest,
@@ -304,7 +306,8 @@ def _run_flags(r: RunResult) -> str:
         flags.append(f"--price-per-hour {hw.price_per_hour_usd}")
     if hw.provisioning != "on-demand":
         flags.append(f"--provisioning {hw.provisioning}")
-    flags.append(f"--precision {r.model.precision}")
+    tag = r.model.precision + (f"-{r.model.variant}" if r.model.variant else "")
+    flags.append(f"--session {tag}")
     return " ".join(flags)
 
 

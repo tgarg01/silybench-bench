@@ -106,3 +106,18 @@ def test_prefix_cache_counters_parse(monkeypatch):
             'vllm:prefix_cache_hits_total{engine="0",model_name="m"} 900.0\n')
     monkeypatch.setattr(multiturn.httpx, "get", lambda *a, **k: type("R", (), {"text": text}))
     assert multiturn.prefix_cache_counters("http://x") == (900.0, 1000.0)
+
+
+def test_variant_runs_publish_as_separate_deployments(tmp_path):
+    from gpubench.dataset import build_site_data
+    from gpubench.sample import sample_runs
+
+    base = sample_runs()[1].model_copy(update={"sample": False, "campaign": "c"})
+    mtp = base.model_copy(update={
+        "run_id": base.run_id + "-mtp",
+        "serving_args": [*base.serving_args, "--speculative-config", "{}"],
+        "model": base.model.model_copy(update={"variant": "mtp"})})
+    runs = build_site_data([base, mtp], tmp_path)
+    assert len(runs) == 2
+    index = json.loads((tmp_path / "index.json").read_text())
+    assert sorted(str(r["variant"]) for r in index) == ["None", "mtp"]

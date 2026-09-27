@@ -118,6 +118,7 @@ def deployments(runs: list[RunResult], gpu_offers: list[GpuOffer]) -> list[dict]
                 "experiment": run.experiment,
                 "model": run.model.hf_id,
                 "precision": run.model.precision,
+                "variant": run.model.variant,
                 "gpu_type": hw.gpu_type,
                 "gpu_count": gpus,
                 "engine_version": run.software.engine_version,
@@ -182,6 +183,7 @@ def comparisons(deployment_rows: list[dict], api_price_rows: list[dict]) -> list
             "input_len": best_d["input_len"], "output_len": best_d["output_len"],
             "hosted": {
                 "run_id": best_d["run_id"], "precision": best_d["precision"],
+                "variant": best_d["variant"],
                 "gpu_type": best_d["gpu_type"], "gpu_count": best_d["gpu_count"],
                 "provider": best_o["provider"], "provisioning": best_o["provisioning"],
                 "usd_per_hour": best_o["usd_per_hour"],
