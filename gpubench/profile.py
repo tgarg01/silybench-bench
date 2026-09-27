@@ -28,8 +28,9 @@ from gpubench.server import CONTAINER_NAME, LOCAL_ONLY, NOFILE, DockerServer
 
 # Kernel families, first match wins (case-insensitive on the kernel name).
 GROUPS: list[tuple[str, str]] = [
-    # Specific names first: e.g. "reshape_and_cache_flash_kernel" writes the KV cache, it is
-    # not FlashAttention.
+    # Specific names first: FlashInfer's GDN kernels contain "_cp"/"copy"-like fragments, and
+    # "reshape_and_cache_flash_kernel" writes the KV cache, it is not FlashAttention.
+    ("linear attention (GDN)", r"gdn|gated_delta|delta_rule|causal_conv|conv1d|mamba|ssm"),
     ("memory / KV cache", r"reshape_and_cache|memcpy|memset|copy_|_copy|fill_|cat_|gather"
                           r"|scatter"),
     ("full attention", r"flash_fwd|flash::|flashattn|fmha|attention|attn_fwd|paged"),
@@ -220,7 +221,9 @@ def profile_point(session: ServingSession, workload: Workload, concurrency: int,
                                 raw_dir="/work/profile", datasets_dir="/work/datasets")
         args.insert(3, "--profile")
         echo(f"profiling {session.session_id} {workload.name} x{concurrency} (nsys)")
-        server.exec(args, check=True)
+        # nsys (--capture-range-end=stop-shutdown) stops the container as soon as the capture
+        # ends, which also kills this in-container client (exit 137): expected, not an error.
+        server.exec(args)
         server.wait_exit()
     finally:
         subprocess.run(["docker", "rm", "-f", CONTAINER_NAME], capture_output=True)
