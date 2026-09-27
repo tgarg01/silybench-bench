@@ -189,6 +189,7 @@ class DockerServer(VllmServer):
             "-v", f"{self.hf_cache}:/root/.cache/huggingface",
             "-v", f"{self.work_dir.resolve()}:/work",
             "-e", "HF_TOKEN",
+            *[x for k, v in self.session.env.items() for x in ("-e", f"{k}={v}")],
             engine.image,
             self.session.served_model,
             *self.session.vllm_args(),
@@ -267,6 +268,7 @@ class NativeServer(VllmServer):
         env["HF_HOME"] = str(self.hf_cache)
         env["PATH"] = f"{self.venv / 'bin'}:{env.get('PATH', '')}"
         env["VIRTUAL_ENV"] = str(self.venv)
+        env.update(self.session.env)
         return env
 
     def serve_cmd(self) -> list[str]:

@@ -60,6 +60,26 @@ REPORT=$($G variants report "$VOUT"/*/ --baseline base --workload toolcall-mini 
 echo "$REPORT" | head -8
 [[ $REPORT == *"| alt |"* && $REPORT == *"| base |"* && $REPORT == *"PASS"* ]]
 
+echo "== multi-turn agent sessions (+ prefix-caching variant)"
+SOUT=$(mktemp -d)
+$G run configs/ci/mock-sessions.yaml --provider ci --gpu-type H100-80GB --price-per-hour 1 \
+  --runtime mock --no-fingerprint --out "$SOUT"
+python3 - "$SOUT" <<'PY'
+import json, glob, sys
+for p in glob.glob(sys.argv[1] + "/*/result.json"):
+    r = json.load(open(p))
+    pts = {x["concurrency"]: x for x in r["perf"]}
+    cap = r["capacity"][0]
+    # The mock's ITL passes 40 ms at 4 users but not at 64, and stop_after_fail keeps the
+    # sweep from going further; every turn of every session must have been answered.
+    assert set(pts) == {1, 2, 4, 64}, pts.keys()
+    assert all(x["completed"] == 3 * max(2, c) for c, x in pts.items()), pts
+    assert pts[1]["ttft_first_turn_p95_ms"] is not None and pts[1]["ttft_later_turns_p99_ms"]
+    print(r["model"]["variant"] or "base", "sessions OK:", cap["max_users_slo"], "users")
+PY
+REPORT=$($G variants report "$SOUT"/*/ --baseline bf16 --workload sessions-mini --price ci=1)
+[[ $REPORT == *"| pc |"* && $REPORT == *"Multi-turn sessions"* ]]
+
 echo "== data repo build over these runs"
 DATA=$(mktemp -d)
 mkdir -p "$DATA/runs" "$DATA/prices"

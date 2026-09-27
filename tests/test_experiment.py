@@ -26,7 +26,8 @@ def cfg():
 
 
 def test_fp8_serves_official_checkpoint(cfg):
-    bf16, fp8 = cfg.sessions()
+    by = {x.tag: x for x in cfg.sessions()}
+    bf16, fp8 = by["bf16"], by["fp8"]
     assert bf16.served_model == "Qwen/Qwen3.8-27B" and not bf16.prequantized
     assert fp8.served_model == "Qwen/Qwen3.8-27B-FP8" and fp8.prequantized
     assert "--quantization" not in fp8.vllm_args()  # read from the checkpoint
@@ -226,7 +227,8 @@ def test_sanitized_bundle_drops_private_state(tmp_path):
 
 def test_per_precision_max_num_seqs_caps_the_sweep(cfg):
     """Smoke run finding: hybrid models need max-num-seqs <= Mamba state blocks."""
-    bf16, fp8 = cfg.sessions()
+    by = {x.tag: x for x in cfg.sessions()}
+    bf16, fp8 = by["bf16"], by["fp8"]
     assert bf16.max_num_seqs == 320 and fp8.max_num_seqs == 768
     a = bf16.vllm_args()
     assert a[a.index("--max-num-seqs") + 1] == "320"

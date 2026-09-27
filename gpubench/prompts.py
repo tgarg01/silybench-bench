@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
 import re
 import shutil
@@ -297,4 +298,39 @@ def build_toolcall_dataset(model: str, tokens: int, count_prompts: int, out: Pat
             f.write(json.dumps({"prompt": p}, ensure_ascii=False) + "\n")
     digest = sha256_file(out)
     echo(f"wrote {len(prompts)} prompts x {tokens} tokens to {out} (sha256 {digest})")
+    return digest
+
+
+def session_turns(render: Callable[[list[dict]], str], messages: list[dict],
+                  turns: int) -> list[str]:
+    """An agent session's turns: the conversation cut at each of its last `turns` tool
+    results (the last cut is the whole context). Each turn's prompt starts with the previous
+    turn's (so a server with prefix caching only prefills what's new)."""
+    cuts = [i for i, m in enumerate(messages) if m["role"] == "tool"][-turns:]
+    prompts = [render(messages[:i + 1]) for i in cuts]
+    for a, b in zip(prompts, prompts[1:], strict=False):
+        common = len(os.path.commonprefix([a, b]))
+        if common < 0.99 * len(a):
+            raise ValueError(f"turn is not a prefix of the next ({common}/{len(a)} chars shared)")
+    return prompts
+
+
+def build_sessions_dataset(model: str, tokens: int, count: int, turns: int, out: Path,
+                           seed: int = 42, shards: int = 4,
+                           echo: Callable[[str], None] = print) -> str:
+    """`count` multi-turn agent sessions ending at exactly `tokens` tokens, from the same
+    contexts (same seed) as the tool-calling prompts."""
+    rows = []
+    for n, (renderer, tool, _, msgs) in enumerate(
+            fitted_contexts(model, tokens, count, seed, shards, echo)):
+        prompts = session_turns(lambda ms, t=tool, r=renderer: r.render(ms, [t]), msgs, turns)
+        lens = [renderer.count(p) for p in prompts]
+        rows.append({"session": n, "turns": prompts, "turn_tokens": lens})
+        echo(f"session {n}: {len(prompts)} turns, {lens[0]:,} -> {lens[-1]:,} tokens")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    digest = sha256_file(out)
+    echo(f"wrote {len(rows)} sessions x {turns} turns to {out} (sha256 {digest})")
     return digest

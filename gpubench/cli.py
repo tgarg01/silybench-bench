@@ -103,6 +103,23 @@ def quality_compare(
         raise typer.Exit(1)
 
 
+@prompts_app.command("make-sessions")
+def make_sessions(
+    model: str = typer.Option(..., help="HF model whose tokenizer and chat template to use"),
+    tokens: int = typer.Option(100_000, help="Length of each session's last turn"),
+    count: int = typer.Option(24, help="Number of sessions"),
+    turns: int = typer.Option(10, help="Turns per session"),
+    out: Path = typer.Option(Path("datasets/agent-sessions-100k.jsonl")),
+    shards: int = typer.Option(4),
+    seed: int = typer.Option(42, help="Same as the tool-calling prompts"),
+) -> None:
+    """Build multi-turn agent sessions (each turn resends the growing context)."""
+    from gpubench.prompts import build_sessions_dataset
+
+    build_sessions_dataset(model, tokens, count, turns, out, seed=seed, shards=shards,
+                           echo=typer.echo)
+
+
 @prompts_app.command("make-toolcall")
 def make_toolcall(
     model: str = typer.Option(..., help="HF model whose tokenizer and chat template to use"),
@@ -139,6 +156,7 @@ def filter_config(
     skip_workloads: list[str] | None = None,
     quality_only: bool = False,
     variants: list[str] | None = None,
+    sessions: list[str] | None = None,
 ) -> BenchConfig:
     """Narrow a campaign (e.g. re-run only FP8). The config hash then reflects what actually ran."""
     cfg = cfg.model_copy(deep=True)
@@ -146,6 +164,16 @@ def filter_config(
         for m in cfg.models:
             m.precisions = [p for p in m.precisions if p in precisions]
             m.variants = {k: v for k, v in m.variants.items() if v.precision in precisions}
+        cfg.models = [m for m in cfg.models if m.precisions or m.variants]
+    if sessions:
+        tags = {s.tag for s in cfg.sessions()}
+        unknown = set(sessions) - tags
+        if unknown:
+            raise typer.BadParameter(f"unknown sessions: {sorted(unknown)} (have {sorted(tags)})")
+        for m in cfg.models:
+            m.precisions = [p for p in m.precisions if p in sessions]
+            m.variants = {k: v for k, v in m.variants.items()
+                          if f"{v.precision}-{k}" in sessions}
         cfg.models = [m for m in cfg.models if m.precisions or m.variants]
     if variants:
         known = {n for m in cfg.models for n in m.variants}
@@ -193,10 +221,11 @@ def validate(
     quality_only: bool = typer.Option(False),
     variant: list[str] = typer.Option(None),
     profile_only: bool = typer.Option(False, help="Accepted for parity with `run`"),
+    session: list[str] = typer.Option(None, help="Only these sessions: fp8, fp8-mtp, ..."),
 ) -> None:
     """Validate a config and print the sessions and perf points it expands to."""
     cfg = filter_config(load_config(config), precision, workload, skip_accuracy, skip_perf,
-                        skip_workload, quality_only, variant)
+                        skip_workload, quality_only, variant, session)
     perf = cfg.perf
     typer.echo(f"campaign {cfg.name}")
     for w in perf.workloads:
@@ -343,6 +372,7 @@ def run(
     quality_only: bool = typer.Option(False, help="Only the quality suites (no perf points)"),
     variant: list[str] = typer.Option(None, help="Only these serving variants (repeatable)"),
     profile_only: bool = typer.Option(False, help="Only the config's nsys profiles (no perf)"),
+    session: list[str] = typer.Option(None, help="Only these sessions: fp8, fp8-mtp, ..."),
 ) -> None:
     """Run a campaign on this machine (needs NVIDIA GPUs; Docker optional)."""
     from gpubench.plan import estimate
@@ -352,7 +382,7 @@ def run(
     from gpubench.storage import upload_run
 
     cfg = filter_config(load_config(config), precision, workload, skip_accuracy, skip_perf,
-                        skip_workload, quality_only, variant)
+                        skip_workload, quality_only, variant, session)
     cfg = resolve_hardware(cfg, provider, price_per_hour, provisioning, gpu_type, gpu_count,
                            machine_type, zone)
     hw = cfg.hardware

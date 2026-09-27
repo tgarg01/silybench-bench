@@ -53,7 +53,17 @@ def summarize(v: VariantRun, workload: str, prices: dict[str, float]) -> dict:
                            for k, usd in prices.items()},
         "slo_ttft_s": cap.slo.ttft_p99_ms / 1000 if cap else None,
         "failed": not pts,
+        # Multi-turn sessions only (None elsewhere), at the capacity level (else 1 user).
+        "sessions": _session_stats(at_cap or one),
     }
+
+
+def _session_stats(p) -> dict | None:
+    if p is None or getattr(p, "ttft_first_turn_p95_ms", None) is None:
+        return None
+    return {"hit_rate": p.prefix_cache_hit_rate, "users": p.concurrency,
+            "first_s": p.ttft_first_turn_p95_ms / 1000,
+            "later_s": (p.ttft_later_turns_p99_ms or 0) / 1000}
 
 
 def quality_vs(base: VariantRun, other: VariantRun, workload: str) -> dict | None:
@@ -113,6 +123,17 @@ def report(run_dirs: list[Path], baseline: str, workload: str,
         cells = ["–" if r["itl_median_ms"].get(c) is None else f"{r['itl_median_ms'][c]:.1f}"
                  for c in levels]
         lines.append(f"| {r['label']} | " + " | ".join(cells) + " |")
+    if any(r["sessions"] for r in rows):
+        lines += ["", "Multi-turn sessions, at each variant's capacity (else 1 user):", "",
+                  "| variant | users | prefix-cache hit rate | turn 1 p95 TTFT (s) "
+                  "| later turns p99 TTFT (s) |", "|---|---|---|---|---|"]
+        for r in rows:
+            s = r["sessions"]
+            if not s:
+                continue
+            hit = "off" if s["hit_rate"] is None else f"{s['hit_rate']:.0%}"
+            lines.append(f"| {r['label']} | {s['users']} | {hit} | {s['first_s']:.1f} "
+                         f"| {s['later_s']:.1f} |")
     profiled = [(v, p) for v in runs for p in v.result.profiles if p.workload == workload]
     if profiled:
         lines += ["", "Where GPU time goes (nsys, one request):", ""]

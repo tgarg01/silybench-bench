@@ -1,0 +1,33 @@
+# CI only: multi-turn agent sessions (gpubench.multiturn) with and without a prefix-caching
+# variant, against the GPU-free mock runtime.
+name: ci-mock-sessions
+engine:
+  image: vllm/vllm-openai:v0.30.0
+models:
+  - hf_id: silybench/mock-8B
+    precisions: [bf16]
+    max_model_len: 4096
+    serving_args:
+      no-enable-prefix-caching: true
+    variants:
+      pc:
+        precision: bf16
+        serving_args: {no-enable-prefix-caching: false, enable-prefix-caching: true}
+        env: {VLLM_SERVER_DEV_MODE: "1"}
+perf:
+  workloads:
+    - name: sessions-mini
+      dataset: sessions
+      input_len: 60
+      output_len: 8
+      dataset_path: tests/fixtures/ci/sessions-mini.jsonl
+      sha256: c8f27ac3b2bf9810bda09154a96a11f832c3da6c2be5d7e88392c6086fb5ab11
+      concurrency: [1, 2, 4, 64]
+      prompts_per_user: 1
+      min_prompts: 2
+      stop_after_fail: true
+      slo: {ttft_p99_ms: 30000, itl_median_ms: 40}
+  repeats: 1
+  capacity: {enabled: false}
+accuracy:
+  enabled: false

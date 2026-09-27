@@ -24,6 +24,33 @@ models:
     precision_serving_args:
       bf16: {max-num-seqs: 320}
       fp8: {max-num-seqs: 768}
+    # FP8 deployment variants (from the optimization screening, 2026-09-27). Run them with
+    # --session fp8-mtp / fp8-pc / fp8-mtp-pc; the plain precisions are sessions bf16 / fp8.
+    variants:
+      mtp:
+        precision: fp8
+        serving_args:
+          speculative-config: {method: mtp, num_speculative_tokens: 2}
+          max-num-seqs: 256
+        description: MTP speculative decoding, 2 draft tokens (lossless by design)
+      pc:
+        precision: fp8
+        serving_args:
+          no-enable-prefix-caching: false
+          enable-prefix-caching: true
+          mamba-cache-mode: align
+        env: {VLLM_SERVER_DEV_MODE: "1"}  # enables POST /reset_prefix_cache between levels
+        description: prefix caching (hybrid-model 'align' mode)
+      mtp-pc:
+        precision: fp8
+        serving_args:
+          speculative-config: {method: mtp, num_speculative_tokens: 2}
+          max-num-seqs: 256
+          no-enable-prefix-caching: false
+          enable-prefix-caching: true
+          mamba-cache-mode: align
+        env: {VLLM_SERVER_DEV_MODE: "1"}
+        description: MTP speculative decoding + prefix caching
 perf:
   workloads:
     # Real tool-calling agent contexts (SWE-agent sessions, exactly 100k tokens each).
@@ -45,6 +72,23 @@ perf:
         dataset_path: datasets/toolcall-100k-quality.jsonl
         dataset_url: https://github.com/tgarg01/silybench-data/releases/download/exp-2026-10-qwen3.8-27b-h100/toolcall-100k-quality.jsonl
         sha256: 2cf0a857ef5f9f37a5430dc683e4853a14084c308322620b8401ad3e62e7df3f
+    # Multi-turn agent sessions: each user runs 10-turn sessions whose context grows from ~93k
+    # to 100k tokens (each turn resends the whole context + the next tool result; median 684 new
+    # tokens). Measures what prefix caching buys a real agent. Same contexts as above.
+    - name: agent-sessions-100k
+      dataset: sessions
+      input_len: 100000
+      output_len: 512
+      dataset_path: datasets/agent-sessions-100k.jsonl
+      dataset_url: https://github.com/tgarg01/silybench-data/releases/download/exp-2026-10-qwen3.8-27b-h100/agent-sessions-100k.jsonl
+      sha256: ed29e1657c610246a83d1f5ffa043eec4c42121c9104ce59b6c38d4bdae14f43
+      concurrency: [1, 2, 3, 4, 6, 8, 10, 12]
+      prompts_per_user: 1  # one 10-turn session per user per level
+      min_prompts: 2
+      repeats: 2
+      num_warmups: 0
+      stop_after_fail: true
+      slo: {ttft_p99_ms: 30000, itl_median_ms: 50}
     - {name: chat-128-128, input_len: 128, output_len: 128}
     - {name: prefill-1024-128, input_len: 1024, output_len: 128}
     - {name: decode-128-1024, input_len: 128, output_len: 1024}

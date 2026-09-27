@@ -212,7 +212,15 @@ def run_session(
                 if skipped:
                     log.info("%s: skipping %s users (> %sx the %s that fit in the KV cache)",
                              workload.name, skipped, perf.max_kv_multiple, kv_users)
-                sweep = {c: measure_and_save(c) for c in levels}
+                sweep = {}
+                for i, c in enumerate(levels):
+                    sweep[c] = measure_and_save(c)
+                    if workload.stop_after_fail and not sweep[c].slo_pass:
+                        skipped = levels[i + 1:] + skipped
+                        if levels[i + 1:]:
+                            log.info("%s: %d users fail the SLO; skipping %s", workload.name,
+                                     c, levels[i + 1:])
+                        break
                 max_users, points = find_max_users(
                     sweep, lambda c: measure_and_save(c, phase="probe"), perf.capacity,
                     ceiling=2 * kv_users if kv_users else None,

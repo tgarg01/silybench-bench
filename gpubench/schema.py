@@ -61,6 +61,10 @@ class PerfPoint(BaseModel):
     avg_power_w: float | None = None
     peak_memory_gb: float | None = None
     output_tokens_per_joule: float | None = None
+    # Multi-turn session workloads (gpubench.multiturn) only.
+    prefix_cache_hit_rate: float | None = None
+    ttft_first_turn_p95_ms: float | None = None
+    ttft_later_turns_p99_ms: float | None = None
     max_gpu_temp_c: float | None = None
     thermal_throttle_fraction: float | None = None  # 0 = never slowed down for heat
     usd_per_1m_output_tokens: float | None = None

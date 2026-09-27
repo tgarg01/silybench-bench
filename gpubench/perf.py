@@ -111,7 +111,14 @@ def build_perf_point(
         else None
     )
 
+    def optional_median(key: str) -> float | None:
+        vals = [float(r[key]) for r in raws if r.get(key) is not None]
+        return float(statistics.median(vals)) if vals else None
+
     return PerfPoint(
+        prefix_cache_hit_rate=optional_median("prefix_cache_hit_rate"),
+        ttft_first_turn_p95_ms=optional_median("ttft_first_turn_p95_ms"),
+        ttft_later_turns_p99_ms=optional_median("ttft_later_turns_p99_ms"),
         workload=workload.name,
         input_len=workload.input_len,
         output_len=workload.output_len,
@@ -165,15 +172,25 @@ def make_point_runner(
         with GpuSampler(work_dir / "telemetry" / f"{stem}.csv") as sampler:
             for rep in range(perf.repeats_for(workload)):
                 fname = f"{stem}_r{rep}.json"
-                exec_fn(
-                    bench_serve_args(
+                if workload.dataset == "sessions":
+                    # Multi-turn agent sessions: a host-side client (vllm bench serve can't).
+                    from gpubench.multiturn import run_sessions
+                    from gpubench.prompts import ensure_dataset
+
+                    run_sessions(
+                        f"http://localhost:{session.config.engine.port}", session.served_model,
+                        ensure_dataset(workload), concurrency, num_prompts,
+                        workload.output_len, work_dir / "raw" / fname, seed=perf.seed + rep,
+                        reset_cache=bool(session.extra_args().get("enable-prefix-caching")),
+                    )
+                else:
+                    exec_fn(bench_serve_args(
                         session, workload, concurrency, num_prompts,
                         seed=perf.seed + rep, result_filename=fname,
                         # Warm up only before the first repeat.
                         num_warmups=perf.warmups_for(workload) if rep == 0 else 0,
                         raw_dir=raw_dir, datasets_dir=datasets_dir,
-                    )
-                )
+                    ))
                 ended = datetime.now()  # same local clock as nvidia-smi timestamps
                 raws.append(json.loads((work_dir / "raw" / fname).read_text()))
                 # The measured interval is the last `duration` seconds before the client exits

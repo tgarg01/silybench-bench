@@ -111,6 +111,7 @@ class ProfiledDockerServer(DockerServer):
             "-v", f"{self.work_dir.resolve()}:/work",
             "-v", f"{root}:/opt/nsys:ro",
             "-e", "HF_TOKEN",
+            *[x for k, v in self.session.env.items() for x in ("-e", f"{k}={v}")],
             "--entrypoint", inner,
             engine.image,
             "profile", "--trace=cuda,nvtx", "--cuda-graph-trace=node",

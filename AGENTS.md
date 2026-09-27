@@ -68,13 +68,19 @@ the VM runs the campaign by itself.
    ```
    Say "about X hours, about $Y, plus restarts if Spot capacity is reclaimed. Start?" **Wait for yes.**
 3. **Launch with the watchdog.** It relaunches after Spot preemptions and resumes from the last
-   measured point. Use the phases that `show` prints (`phases:`). For `2026-10-qwen3.8-27b-h100`
-   the 100k tool-calling scenario runs first on both precisions, including its quality suite, and
-   the other five scenarios run after it:
+   measured point. Pass every phase that `show` prints (`phases:`), in order, one `--phase` each.
+   For `2026-10-qwen3.8-27b-h100`: the 100k tool-calling scenario on both precisions (with its
+   quality suite), FP8 + MTP on it, the multi-turn agent sessions with and without prefix caching,
+   then the other five scenarios:
    ```bash
    infra/scripts/watch.sh h100-1g <config from show> --experiment <id> --image <image from show> \
-     --phase "--workload toolcall-100k-512" --phase "--skip-workload toolcall-100k-512"
+     --phase "--session bf16 --session fp8 --workload toolcall-100k-512" \
+     --phase "--session fp8-mtp --workload toolcall-100k-512" \
+     --phase "--session fp8 --session fp8-pc --session fp8-mtp-pc --workload agent-sessions-100k" \
+     --phase "--session bf16 --session fp8 --skip-workload toolcall-100k-512 --skip-workload agent-sessions-100k"
    ```
+   To reproduce only part of an experiment, pass just those phases (and tell the person which
+   published numbers it covers).
    Every relaunched VM re-fingerprints itself and must match the first one exactly (±5% on the
    measured speeds). If it doesn't, watch.sh retries up to 3 hosts, then stops.
    On boot the VM fingerprints its hardware and runs **verify-host** against the experiment's
@@ -162,6 +168,9 @@ To measure a GPU/provider that no experiment covers yet: `./setup.sh`,
 ## What gets measured
 - **Latency** per scenario and number of users: p95/p99 time to first token (TTFT), time per
   output token (TPOT), end-to-end latency; median/p95/p99 inter-token latency.
+- **Multi-turn agent sessions** (`dataset: sessions`): each user runs one 10-turn session at a
+  time, every turn resending the growing context. Also records first-turn vs later-turn TTFT and,
+  with prefix caching on, the cache hit rate (the cache is reset before every measurement).
 - **Capacity**: the most concurrent users with p99 TTFT ≤ the scenario's limit (2 s, or 30 s for
   100k-token prompts) and median inter-token latency ≤ 50 ms. This drives the cost comparison.
 - **Throughput, power, tokens per joule, temperature and thermal throttling** per point.

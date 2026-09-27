@@ -81,6 +81,7 @@ class Variant(BaseModel):
 
     precision: Precision
     serving_args: dict[str, object] = Field(default_factory=dict)
+    env: dict[str, str] = Field(default_factory=dict)  # server environment, e.g. dev mode
     description: str = ""
 
 
@@ -136,7 +137,9 @@ class Workload(BaseModel):
     name: str
     # random: synthetic tokens of exactly input_len. custom: a JSONL of pre-rendered prompts
     # ({"prompt": ...}, chat template already applied) of input_len tokens each.
-    dataset: Literal["random", "sharegpt", "custom"] = "random"
+    # sessions: a JSONL of multi-turn agent sessions ({"session": id, "turns": [prompt, ...]},
+    # each turn's prompt a prefix of the next), driven by gpubench.multiturn.
+    dataset: Literal["random", "sharegpt", "custom", "sessions"] = "random"
     input_len: int | None = None
     output_len: int | None = None
     dataset_path: str | None = None  # sharegpt / custom: local path (relative to the repo)
@@ -147,17 +150,21 @@ class Workload(BaseModel):
     slo: SLO | None = None
     concurrency: list[int] | None = None
     min_prompts: int | None = None
+    prompts_per_user: int | None = None  # sessions per user for `sessions` workloads
     repeats: int | None = None
     num_warmups: int | None = None
     quality: QualitySuite | None = None
+    # Skip the remaining (higher) sweep levels once one fails the SLO: latency only grows with
+    # users, and each failing level of a slow workload can cost tens of minutes.
+    stop_after_fail: bool = False
 
     @model_validator(mode="after")
     def _check(self) -> Workload:
-        if self.dataset in ("random", "custom") and (
+        if self.dataset in ("random", "custom", "sessions") and (
             self.input_len is None or self.output_len is None
         ):
             raise ValueError(f"workload {self.name}: {self.dataset} needs input_len and output_len")
-        if self.dataset == "custom" and not (self.dataset_path and self.sha256):
+        if self.dataset in ("custom", "sessions") and not (self.dataset_path and self.sha256):
             raise ValueError(f"workload {self.name}: custom dataset needs dataset_path and sha256")
         return self
 
@@ -201,7 +208,9 @@ class PerfConfig(BaseModel):
 
     def num_prompts(self, concurrency: int, workload: Workload | None = None) -> int:
         floor = workload.min_prompts if workload and workload.min_prompts else self.min_prompts
-        return max(floor, self.prompts_per_user * concurrency)
+        per_user = (workload.prompts_per_user if workload and workload.prompts_per_user
+                    else self.prompts_per_user)
+        return max(floor, per_user * concurrency)
 
     def slo_for(self, workload: Workload) -> SLO:
         return workload.slo or self.slo
@@ -287,6 +296,15 @@ class ServingSession(BaseModel):
     precision: Precision
     variant: str | None = None
 
+    @property
+    def tag(self) -> str:
+        """<precision> or <precision>-<variant>: the selector for `--session`."""
+        return f"{self.precision}-{self.variant}" if self.variant else self.precision
+
+    @property
+    def env(self) -> dict[str, str]:
+        return dict(self.model.variants[self.variant].env) if self.variant else {}
+
     def extra_args(self) -> dict[str, object]:
         """Serving args in precedence order: model < precision < variant."""
         m = self.model
@@ -305,8 +323,7 @@ class ServingSession(BaseModel):
     def session_id(self) -> str:
         hw = self.config.hardware
         gpu = f"{hw.gpu_type.lower()}x{hw.gpu_count}" if hw else "gpu"
-        tag = f"{self.precision}-{self.variant}" if self.variant else self.precision
-        return f"{gpu}_{self.model.slug}_{tag}"
+        return f"{gpu}_{self.model.slug}_{self.tag}"
 
     @property
     def served_model(self) -> str:
@@ -342,6 +359,8 @@ class ServingSession(BaseModel):
         args += self.config.parallelism.vllm_args()
         for key, value in self.extra_args().items():
             flag = f"--{key}"
+            if value is False or value is None:
+                continue  # lets a variant switch off a flag set by the model
             if value is True:
                 args.append(flag)
             elif isinstance(value, dict):
