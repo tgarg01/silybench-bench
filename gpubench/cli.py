@@ -192,6 +192,7 @@ def validate(
     skip_quality: bool = typer.Option(False),
     quality_only: bool = typer.Option(False),
     variant: list[str] = typer.Option(None),
+    profile_only: bool = typer.Option(False, help="Accepted for parity with `run`"),
 ) -> None:
     """Validate a config and print the sessions and perf points it expands to."""
     cfg = filter_config(load_config(config), precision, workload, skip_accuracy, skip_perf,
